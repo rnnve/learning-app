@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 PACKAGE = "cc.rynni.studyapp"
 API_URL = "https://learning-app-api.rynni.cc"
+SIGNING_CERTIFICATE = "5ca2c8673e0a1330026b0c4f6c67b2b31d2e3cbb2b362ce2e8766956556e195a"
 
 
 def select_build(data):
@@ -136,6 +137,7 @@ def main():
     parser.add_argument("--cdn-path", default="/apks/")
     parser.add_argument("--cdn-public-base-url", help="Public CDN origin, if different from the upload endpoint")
     parser.add_argument("--max-upload-bytes", type=int, default=100_000_000)
+    parser.add_argument("--require-android-tools", action="store_true")
     parser.add_argument("--remote-dir", default="/home/rinne")
     parser.add_argument("--identity-file", type=Path)
     parser.add_argument("--known-hosts-file", type=Path)
@@ -150,10 +152,11 @@ def main():
         if not os.environ.get("CDN_UPLOAD_KEY", "").strip():
             raise ValueError("Set CDN_UPLOAD_KEY before uploading")
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    if args.cdn_url and state.get("buildId") == build["id"] and state.get("destination") == destination and state.get("cdnUrl"):
+    checks_satisfied = not args.require_android_tools or state.get("androidVerified")
+    if checks_satisfied and args.cdn_url and state.get("buildId") == build["id"] and state.get("destination") == destination and state.get("cdnUrl"):
         print(f"Already delivered: {state['cdnUrl']}")
         return
-    if state.get("buildId") == build["id"] and state.get("destination") == destination and apk.exists():
+    if checks_satisfied and state.get("buildId") == build["id"] and state.get("destination") == destination and apk.exists():
         if sha256(apk) == state.get("sha256"):
             print(f"Already delivered build {build['id']}")
             return
@@ -165,10 +168,13 @@ def main():
         request = Request(url, headers={"User-Agent": "Mozilla/5.0 StudyApp-APK-Sync/1.0"})
         with urlopen(request, timeout=120) as response, download.open("wb") as output:
             shutil.copyfileobj(response, output)
-        subprocess.run([
+        verification = [
             sys.executable, str(Path(__file__).with_name("verify_apk.py")), str(download),
             "--package", PACKAGE, "--api-url", API_URL,
-        ], check=True)
+        ]
+        if args.require_android_tools:
+            verification += ["--require-android-tools", "--certificate-sha256", SIGNING_CERTIFICATE]
+        subprocess.run(verification, check=True)
         digest = sha256(download)
         os.replace(download, apk)
         cdn_url = None
@@ -188,6 +194,7 @@ def main():
         "versionCode": build["appBuildVersion"], "sha256": digest,
         "filename": filename, "destination": destination,
         "cdnUrl": cdn_url,
+        "androidVerified": args.require_android_tools,
     })
     print(f"Ready: {apk}")
 
