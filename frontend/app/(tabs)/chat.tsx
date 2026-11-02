@@ -9,8 +9,8 @@ import { formatDate } from "@/lib/format";
 import { haptics } from "@/lib/haptics";
 import { tokens } from "@/theme/tokens";
 import { type AppTheme, useAppTheme as useTheme } from "@/theme/useAppTheme";
-import { router } from "expo-router";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { router, useFocusEffect } from "expo-router";
+import React, { useCallback, useRef, useState } from "react";
 import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -96,6 +96,7 @@ const createStyles = (theme: AppTheme) =>
       paddingHorizontal: 20,
     },
     modalContent: {
+      maxHeight: "80%",
       backgroundColor: theme.colors.surface,
       borderRadius: tokens.radii.xl,
       padding: 24,
@@ -182,10 +183,17 @@ export default function ChatScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchConversations();
-    fetchSources();
-  }, [fetchConversations, fetchSources]);
+  useFocusEffect(
+    useCallback(() => {
+      void fetchConversations();
+      void fetchSources();
+    }, [fetchConversations, fetchSources]),
+  );
+
+  const openNewChat = () => {
+    void fetchSources();
+    setShowNewChatModal(true);
+  };
 
   const handleNewChat = async (sourceId?: string) => {
     if (creatingRef.current) return;
@@ -285,9 +293,9 @@ export default function ChatScreen() {
             style={{ flex: 1, marginVertical: 0 }}
             icon="💬"
             title={i18n.t("chat.emptyConversation")}
-            description={i18n.t("chat.emptyConversation")}
+            description={i18n.t("chat.emptyInboxDescription")}
             actionLabel={i18n.t("chat.newChat")}
-            onAction={() => setShowNewChatModal(true)}
+            onAction={openNewChat}
           />
         ) : null}
       </ScrollView>
@@ -311,7 +319,7 @@ export default function ChatScreen() {
               backgroundColor: theme.colors.primary,
             },
           ]}
-          onPress={() => setShowNewChatModal(true)}
+          onPress={openNewChat}
           accessibilityRole="button"
           accessibilityLabel={i18n.t("chat.newChat")}
         >
@@ -328,7 +336,14 @@ export default function ChatScreen() {
 
       {error ? <ErrorState error={error} onRetry={fetchConversations} /> : null}
 
-      <Modal visible={showNewChatModal} animationType="slide" transparent>
+      <Modal
+        visible={showNewChatModal}
+        animationType="fade"
+        transparent
+        onRequestClose={() => {
+          if (!creating) setShowNewChatModal(false);
+        }}
+      >
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { backgroundColor: theme.colors.surface }]}>
             <Text
@@ -339,7 +354,7 @@ export default function ChatScreen() {
             >
               {i18n.t("chat.newChat")}
             </Text>
-            <View>
+            <ScrollView style={{ flexShrink: 1 }} keyboardShouldPersistTaps="handled">
               <TouchableOpacity
                 style={styles.sourceItem}
                 disabled={creating}
@@ -359,7 +374,7 @@ export default function ChatScreen() {
                       {i18n.t("chat.newChat")}
                     </Text>
                     <Text style={[{ color: theme.colors.onSurface }, styles.sourceMeta]}>
-                      {i18n.t("chat.selectSourcePrompt")}
+                      {i18n.t("chat.generalDescription")}
                     </Text>
                   </View>
                 </View>
@@ -413,7 +428,6 @@ export default function ChatScreen() {
                         {source.title}
                       </Text>
                       <Text style={[{ color: theme.colors.onSurface }, styles.sourceMeta]}>
-                        {source.pageCount}{" "}
                         {i18n.t("source.pagesCount", { count: source.pageCount })} ·{" "}
                         {formatDate(source.createdAt, i18n.language as "th" | "en")}
                       </Text>
@@ -421,9 +435,10 @@ export default function ChatScreen() {
                   </View>
                 </TouchableOpacity>
               ))}
-            </View>
+            </ScrollView>
             <TouchableOpacity
               style={styles.cancelButton}
+              disabled={creating}
               onPress={() => setShowNewChatModal(false)}
             >
               <Text style={[{ color: theme.colors.onSurface }, styles.cancelText]}>
