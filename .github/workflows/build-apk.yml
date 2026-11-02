@@ -1,0 +1,88 @@
+name: Build APK on GitHub
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-apk-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EAS_NO_VCS: '1'
+      EAS_PROJECT_ROOT: ${{ github.workspace }}/frontend
+      EAS_SKIP_AUTO_FINGERPRINT: '1'
+      EXPO_PUBLIC_API_URL: https://learning-app-api.rynni.cc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: '27.2.0'
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Prepare Android build tools
+        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+      - name: Install dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+      - name: Build signed release APK with EAS locally
+        working-directory: frontend
+        run: eas build --platform android --profile preview --local --non-interactive --output "$RUNNER_TEMP/studyapp.apk"
+      - name: Verify Android package and signature
+        run: |
+          python tools/verify_apk.py "$RUNNER_TEMP/studyapp.apk" \
+            --package cc.rynni.studyapp --api-url "$EXPO_PUBLIC_API_URL" \
+            --require-android-tools \
+            --certificate-sha256 5ca2c8673e0a1330026b0c4f6c67b2b31d2e3cbb2b362ce2e8766956556e195a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: studyapp-android-apk
+          path: ${{ runner.temp }}/studyapp.apk
+      - name: Upload verified APK to CDN
+        env:
+          CDN_UPLOAD_KEY: ${{ secrets.CDN_UPLOAD_KEY }}
+          CDN_UPLOAD_URL: ${{ vars.CDN_UPLOAD_URL || 'https://cdn.rynni.cc/upload' }}
+          CDN_PUBLIC_BASE_URL: ${{ vars.CDN_PUBLIC_BASE_URL || 'https://cdn.rynni.cc' }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools')
+          from sync_latest_apk import sha256, upload_cdn
+          config = json.loads(Path('frontend/app.json').read_text())['expo']
+          apk = Path(os.environ['RUNNER_TEMP']) / 'studyapp.apk'
+          versioned = apk.with_name(f"studyapp-{config['version']}-{config['android']['versionCode']}.apk")
+          apk.rename(versioned)
+          if versioned.stat().st_size > 100_000_000:
+              raise ValueError('APK exceeds the CDN upload limit')
+          url = upload_cdn(versioned, os.environ['CDN_UPLOAD_URL'], '/apks/', os.environ['CDN_PUBLIC_BASE_URL'])
+          details = {'version': config['version'], 'versionCode': config['android']['versionCode'],
+                     'sha256': sha256(versioned), 'cdnUrl': url, 'androidVerified': True,
+                     'sourceCommit': os.environ['GITHUB_SHA'], 'buildId': 'github-' + os.environ['GITHUB_RUN_ID']}
+          (versioned.parent / 'apk-sync-state.json').write_text(json.dumps(details, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write(f"[Download APK {config['version']}]({url})\n\nSHA-256: `{details['sha256']}`\n")
+          print(f'CDN download: {url}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latest-apk-details
+          path: ${{ runner.temp }}/apk-sync-state.json
