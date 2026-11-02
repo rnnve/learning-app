@@ -34,6 +34,18 @@ attempting the request, matching the current upload constraint.
 Run manually from **Actions → Sync latest APK → Run workflow**. The workflow
 syncs existing builds; it does not start additional Expo builds.
 
+## Build on a GitHub runner
+
+When the Expo cloud queue is busy, run **Actions → Build APK on GitHub → Run
+workflow**. This manual workflow uses `eas build --local` on Linux with the
+`preview` profile and the existing managed Android signing credentials. It
+installs the required Android SDK and checks the APK signature and alignment
+before uploading it to the CDN.
+
+The APK is also saved as a GitHub Actions artifact. The job summary and
+`latest-apk-details` artifact contain its CDN link and SHA-256. These local EAS
+builds are separate from the cloud builds polled by `Sync latest APK`.
+
 ## APK size
 
 The `preview` EAS profile builds both `armeabi-v7a` and `arm64-v8a` for Android
