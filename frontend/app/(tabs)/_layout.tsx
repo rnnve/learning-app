@@ -3,7 +3,7 @@ import i18n from "@/i18n";
 import { tokens } from "@/theme/tokens";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
-import { NativeTabs } from "expo-router/unstable-native-tabs";
+import { NativeTabs } from "expo-router/native-tabs";
 import type React from "react";
 import { type ColorValue, Platform, StyleSheet, View } from "react-native";
 import { useTheme } from "react-native-paper";
@@ -31,7 +31,13 @@ function TabIcon({
       <MaterialCommunityIcons
         name={focused ? activeIcon : inactiveIcon}
         size={22}
-        color={focused ? theme.colors.onSecondaryContainer : color}
+        color={
+          focused
+            ? theme.colors.onSecondaryContainer
+            : typeof color === "string"
+              ? color
+              : theme.colors.onSurfaceVariant
+        }
       />
     </View>
   );
