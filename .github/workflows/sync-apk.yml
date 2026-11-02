@@ -31,6 +31,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+      - name: Install project dependencies for Expo config plugins
+        working-directory: frontend
+        run: bun install --frozen-lockfile
       - name: Check Expo authentication
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
