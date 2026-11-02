@@ -23,9 +23,11 @@ import {
   Keyboard,
   Modal,
   ScrollView,
+  type ScrollViewInstance,
   StyleSheet,
   Text,
   TextInput,
+  type TextInputInstance,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -232,8 +234,8 @@ export default function ChatConversationScreen() {
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [text, setText] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const messagesEndRef = useRef<ScrollView>(null);
-  const inputRef = useRef<TextInput>(null);
+  const messagesEndRef = useRef<ScrollViewInstance>(null);
+  const inputRef = useRef<TextInputInstance>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchConversation = useCallback(async () => {
