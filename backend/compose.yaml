@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: thaistudy
+      POSTGRES_DB: thaistudy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U thaistudy -d thaistudy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bun", "run", "scripts/migrate.ts"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://thaistudy:${POSTGRES_PASSWORD:-change-me}@db:5432/thaistudy
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://thaistudy:${POSTGRES_PASSWORD:-change-me}@db:5432/thaistudy
+      STORAGE_DIR: /data/storage
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  storage:
