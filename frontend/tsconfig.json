@@ -1,0 +1,16 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    // `expo/tsconfig.base` sets `moduleDetection: force`, which turns the
+    // global declaration files of @types/jest into modules and removes the
+    // `describe` / `it` / `expect` globals from the test files.
+    "moduleDetection": "auto",
+    "types": ["jest", "node", "react"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", "nativewind-env.d.ts"],
+  "exclude": ["node_modules/**"]
+}
