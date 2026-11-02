@@ -2,9 +2,42 @@
 import argparse
 import hashlib
 import json
+import os
+import re
 import struct
+import subprocess
 import zipfile
 from pathlib import Path
+
+
+def verify_android_tools(apk, expected_certificate):
+    configured = os.environ.get("ANDROID_BUILD_TOOLS")
+    if configured:
+        tools = Path(configured)
+    else:
+        sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+        if not sdk:
+            raise ValueError("Set ANDROID_HOME or ANDROID_BUILD_TOOLS for Android signature checks")
+        candidates = list((Path(sdk) / "build-tools").glob("*/lib/apksigner.jar"))
+        if not candidates:
+            raise ValueError("Android SDK build-tools are not installed")
+        tools = max(candidates, key=lambda p: tuple(int(n) for n in re.findall(r"\d+", p.parent.parent.name))).parent.parent
+    signature = subprocess.run([
+        "java", "-jar", str(tools / "lib" / "apksigner.jar"), "verify", "--print-certs", str(apk),
+    ], capture_output=True, text=True)
+    if signature.returncode:
+        raise ValueError("Android apksigner rejected the APK signature")
+    certificates = re.findall(r"certificate SHA-256 digest:\s*([0-9a-fA-F]+)", signature.stdout)
+    if len(certificates) != 1:
+        raise ValueError("Expected one APK signing certificate")
+    certificate = certificates[0].lower()
+    if expected_certificate and certificate != expected_certificate.lower():
+        raise ValueError("APK signing certificate differs from the existing app")
+    zipalign = tools / ("zipalign.exe" if os.name == "nt" else "zipalign")
+    alignment = subprocess.run([str(zipalign), "-c", "-P", "16", "4", str(apk)], capture_output=True, text=True)
+    if alignment.returncode:
+        raise ValueError("Android zipalign rejected the APK alignment")
+    return {"signatureVerified": True, "zipAlignmentVerified": True, "certificateSha256": certificate}
 
 
 def manifest_package(data):
@@ -54,6 +87,8 @@ def main():
     parser.add_argument("apk", type=Path)
     parser.add_argument("--package", required=True)
     parser.add_argument("--api-url", required=True)
+    parser.add_argument("--require-android-tools", action="store_true")
+    parser.add_argument("--certificate-sha256")
     args = parser.parse_args()
     with zipfile.ZipFile(args.apk) as archive:
         if archive.testzip() is not None:
@@ -65,9 +100,13 @@ def main():
         bundle = archive.read("assets/index.android.bundle")
         if not any(args.api_url.encode(codec) in bundle for codec in ("utf-8", "utf-16-le")):
             raise ValueError("Expected API URL is missing from the JavaScript bundle")
-    print(json.dumps({"package": package, "apiUrl": args.api_url, "sizeBytes": args.apk.stat().st_size,
-                      "sha256": hashlib.file_digest(args.apk.open("rb"), "sha256").hexdigest(),
-                      "verified": True}))
+    with args.apk.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    result = {"package": package, "apiUrl": args.api_url, "sizeBytes": args.apk.stat().st_size,
+              "sha256": digest, "verified": True}
+    if args.require_android_tools:
+        result["androidVerification"] = verify_android_tools(args.apk, args.certificate_sha256)
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":
