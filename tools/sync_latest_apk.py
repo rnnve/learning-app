@@ -75,7 +75,7 @@ def deploy(apk, digest, target, directory, identity, known_hosts):
     print(f"Delivered to {target}:{remote_apk}")
 
 
-def upload_cdn(apk, endpoint, directory):
+def upload_cdn(apk, endpoint, directory, public_base_url=None):
     key = os.environ.get("CDN_UPLOAD_KEY", "").strip()
     if not key:
         raise ValueError("Set CDN_UPLOAD_KEY before uploading")
@@ -106,6 +106,12 @@ def upload_cdn(apk, endpoint, directory):
             raise RuntimeError(f"CDN upload failed (HTTP {status or 'unknown'}, curl exit {result.returncode})")
         data = json.loads(response_file.read_text(encoding="utf-8"))
         public_url = data.get("url", "")
+        filename = data.get("filename")
+        if filename:
+            if ".." in filename.split("/"):
+                raise ValueError("CDN returned an invalid file path")
+            base = public_base_url or urlunparse(parsed._replace(path="", query="", fragment=""))
+            public_url = base.rstrip("/") + "/" + filename.lstrip("/")
         if urlparse(public_url).scheme != "https":
             raise ValueError("CDN did not return an HTTPS download URL")
         if data.get("size") != apk.stat().st_size:
@@ -128,6 +134,7 @@ def main():
     delivery.add_argument("--ssh-target", help="Optional SSH destination, e.g. rinne@192.168.1.36")
     delivery.add_argument("--cdn-url", help="CDN multipart upload endpoint (key comes from CDN_UPLOAD_KEY)")
     parser.add_argument("--cdn-path", default="/apks/")
+    parser.add_argument("--cdn-public-base-url", help="Public CDN origin, if different from the upload endpoint")
     parser.add_argument("--max-upload-bytes", type=int, default=100_000_000)
     parser.add_argument("--remote-dir", default="/home/rinne")
     parser.add_argument("--identity-file", type=Path)
@@ -139,7 +146,7 @@ def main():
     state_path = args.output_dir / "apk-sync-state.json"
     destination = f"{args.ssh_target}:{args.remote_dir}" if args.ssh_target else str(args.output_dir.resolve())
     if args.cdn_url:
-        destination = f"cdn:{args.cdn_url}:{args.cdn_path}"
+        destination = f"cdn:{args.cdn_url}:{args.cdn_path}:{args.cdn_public_base_url or ''}"
         if not os.environ.get("CDN_UPLOAD_KEY", "").strip():
             raise ValueError("Set CDN_UPLOAD_KEY before uploading")
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -168,7 +175,7 @@ def main():
         if args.cdn_url:
             if apk.stat().st_size > args.max_upload_bytes:
                 raise ValueError(f"APK is larger than the {args.max_upload_bytes:,}-byte CDN upload limit")
-            cdn_url = upload_cdn(apk, args.cdn_url, args.cdn_path)
+            cdn_url = upload_cdn(apk, args.cdn_url, args.cdn_path, args.cdn_public_base_url)
             print(f"CDN download: {cdn_url}")
         if args.ssh_target:
             deploy(apk, digest, args.ssh_target, args.remote_dir, args.identity_file, args.known_hosts_file)
