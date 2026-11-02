@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "Thai AI Study",
+    "slug": "thai-ai-study",
+    "version": "1.0.1",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "thaistudy",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F8FAFC"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "cc.rynni.studyapp"
+    },
+    "android": {
+      "package": "cc.rynni.studyapp",
+      "versionCode": 2,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#F8FAFC"
+      },
+      "permissions": ["android.permission.CAMERA", "android.permission.RECORD_AUDIO"]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "แอปต้องการสิทธิ์เข้าถึงกล้องเพื่อถ่ายภาพเอกสารหรือสมุดโน้ตสำหรับสร้างสื่อการเรียน"
+        }
+      ],
+      "expo-font",
+      "expo-image",
+      "expo-localization",
+      "expo-secure-store",
+      "expo-status-bar"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "8a12fc30-c37a-4248-adc8-c3eedc1416b7"
+      }
+    },
+    "owner": "ivryn"
+  }
+}
