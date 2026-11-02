@@ -10,7 +10,6 @@ import { useAuth } from "@/auth/AuthProvider";
 import { ChatBubble } from "@/components/ui/ChatBubble";
 import { ErrorState } from "@/components/ui/ErrorState";
 import i18n from "@/i18n";
-import { formatDate } from "@/lib/format";
 import { haptics } from "@/lib/haptics";
 import { generateUuid } from "@/lib/uuid";
 import { tokens } from "@/theme/tokens";
@@ -19,9 +18,10 @@ import { router, useLocalSearchParams } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Image,
   Keyboard,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   type ScrollViewInstance,
   StyleSheet,
@@ -31,7 +31,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 const createStyles = (theme: AppTheme) =>
   StyleSheet.create({
@@ -51,6 +51,9 @@ const createStyles = (theme: AppTheme) =>
       borderBottomColor: theme.colors.outlineVariant,
     },
     headerTitle: {
+      flex: 1,
+      marginHorizontal: 12,
+      textAlign: "center",
       fontSize: 18,
       fontWeight: "700",
     },
@@ -63,7 +66,7 @@ const createStyles = (theme: AppTheme) =>
       justifyContent: "center",
     },
     messagesContainer: {
-      flex: 1,
+      flexGrow: 1,
       paddingHorizontal: 16,
       paddingVertical: 12,
     },
@@ -174,6 +177,8 @@ const createStyles = (theme: AppTheme) =>
     },
     modalButton: {
       flex: 1,
+      minHeight: 48,
+      justifyContent: "center",
       paddingVertical: 12,
       borderRadius: tokens.radii.md,
       alignItems: "center",
@@ -191,7 +196,7 @@ const createStyles = (theme: AppTheme) =>
       fontWeight: "600",
     },
     modalButtonTextCancel: { color: theme.colors.onSurfaceVariant },
-    modalButtonTextConfirm: { color: theme.colors.onPrimary },
+    modalButtonTextConfirm: { color: theme.colors.onError },
     loadingOverlay: {
       position: "absolute",
       top: 0,
@@ -220,6 +225,7 @@ interface PendingMessage {
 export default function ChatConversationScreen() {
   const theme = useTheme();
   const styles = createStyles(theme);
+  const insets = useSafeAreaInsets();
   const { isAuthenticated } = useAuth();
   const { conversationId, sourceId } = useLocalSearchParams<{
     conversationId?: string;
@@ -234,41 +240,67 @@ export default function ChatConversationScreen() {
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [text, setText] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const mountedRef = useRef(true);
+  const activeSendRef = useRef<AbortController | null>(null);
+  const deletingRef = useRef(false);
+  const loadRequestRef = useRef(0);
+  const creationRef = useRef<{ key: string; promise: Promise<Conversation> } | null>(null);
   const messagesEndRef = useRef<ScrollViewInstance>(null);
   const inputRef = useRef<TextInputInstance>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchConversation = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
+    setLoading(true);
     try {
       let conv: Conversation;
       if (conversationId && conversationId !== "new") {
         conv = await getConversation(conversationId);
-      } else if (sourceId) {
-        conv = await createConversation({ sourceId });
       } else {
-        conv = await createConversation({});
+        const key = sourceId || "general";
+        if (!creationRef.current || creationRef.current.key !== key) {
+          creationRef.current = {
+            key,
+            promise: createConversation(sourceId ? { sourceId } : {}),
+          };
+        }
+        conv = await creationRef.current.promise.catch((error) => {
+          creationRef.current = null;
+          throw error;
+        });
       }
-      setConversation(conv);
       const res = await getMessages(conv.id);
-      setMessages(res.items.reverse());
+      if (!mountedRef.current || requestId !== loadRequestRef.current) return;
+      setConversation(conv);
+      setMessages([...res.items].reverse());
       setLoadError(null);
     } catch (err: any) {
-      setLoadError(err.message || "Failed to load conversation");
+      if (mountedRef.current && requestId === loadRequestRef.current) setLoadError(err);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && requestId === loadRequestRef.current) setLoading(false);
     }
   }, [conversationId, sourceId]);
 
   useEffect(() => {
-    fetchConversation();
+    mountedRef.current = true;
+    void fetchConversation();
+    return () => {
+      mountedRef.current = false;
+      loadRequestRef.current += 1;
+      activeSendRef.current?.abort();
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    };
   }, [fetchConversation]);
 
   useEffect(() => {
     // Keep the newest message in view whenever the list changes.
-    if (messages.length > 0) {
+    if (messages.length > 0 || pending) {
       messagesEndRef.current?.scrollToEnd({ animated: true });
     }
-  }, [messages]);
+  }, [messages, pending]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollToEnd({ animated: true });
@@ -282,10 +314,17 @@ export default function ChatConversationScreen() {
   }, []);
 
   useEffect(() => {
+    const show = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      () => setKeyboardVisible(true),
+    );
+    const hide = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => setKeyboardVisible(false),
+    );
     return () => {
-      if (typingTimerRef.current) {
-        clearTimeout(typingTimerRef.current);
-      }
+      show.remove();
+      hide.remove();
     };
   }, []);
 
@@ -296,6 +335,9 @@ export default function ChatConversationScreen() {
    */
   const deliverMessage = useCallback(
     async (content: string, clientMessageId: string, idempotencyKey: string) => {
+      if (!conversation || activeSendRef.current || deletingRef.current) return;
+      const controller = new AbortController();
+      activeSendRef.current = controller;
       setSending(true);
       setPending({ clientMessageId, content, idempotencyKey, status: "sending" });
       setAwaitingReply(true);
@@ -311,19 +353,33 @@ export default function ChatConversationScreen() {
           content,
           clientMessageId,
           idempotencyKey,
+          signal: controller.signal,
         });
-        setMessages((prev) => [...prev, userMessage, assistantMessage]);
+        if (!mountedRef.current || controller.signal.aborted) return;
+        setMessages((prev) => [
+          ...prev.filter(
+            (message) => message.id !== userMessage.id && message.id !== assistantMessage.id,
+          ),
+          userMessage,
+          assistantMessage,
+        ]);
         setPending(null);
-        setText("");
         haptics.light();
       } catch {
+        if (!mountedRef.current || controller.signal.aborted) return;
         // Keep the bubble (and therefore the typed text) and offer a Retry.
         setPending({ clientMessageId, content, idempotencyKey, status: "failed" });
+        setText((draft) => draft || content);
         haptics.error();
       } finally {
-        clearTypingTimer();
-        setAwaitingReply(false);
-        setSending(false);
+        if (activeSendRef.current === controller) {
+          activeSendRef.current = null;
+          clearTypingTimer();
+          if (mountedRef.current) {
+            setAwaitingReply(false);
+            setSending(false);
+          }
+        }
       }
     },
     [conversation, clearTypingTimer],
@@ -331,16 +387,22 @@ export default function ChatConversationScreen() {
 
   const handleSend = useCallback(async () => {
     const trimmedText = text.trim();
-    if (!trimmedText || sending || !conversation) return;
+    if (!trimmedText || activeSendRef.current || deletingRef.current || !conversation) return;
+    setText("");
+    if (pending?.status === "failed" && pending.content === trimmedText) {
+      await deliverMessage(pending.content, pending.clientMessageId, pending.idempotencyKey);
+      return;
+    }
     // Both ids have to be UUIDs: the backend validates the Idempotency-Key
     // header and the clientMessageId of the message body.
     const clientMessageId = generateUuid();
     const idempotencyKey = generateUuid();
     await deliverMessage(trimmedText, clientMessageId, idempotencyKey);
-  }, [text, sending, conversation, deliverMessage]);
+  }, [text, pending, conversation, deliverMessage]);
 
   const handleRetry = useCallback(async () => {
     if (!pending || pending.status !== "failed" || sending) return;
+    setText((draft) => (draft.trim() === pending.content ? "" : draft));
     await deliverMessage(pending.content, pending.clientMessageId, pending.idempotencyKey);
   }, [pending, sending, deliverMessage]);
 
@@ -350,20 +412,34 @@ export default function ChatConversationScreen() {
   }, []);
 
   const handleExit = useCallback(() => {
+    Keyboard.dismiss();
     router.back();
   }, []);
 
   const handleDelete = useCallback(async () => {
-    if (!conversation) return;
+    if (!conversation || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeleting(true);
+    setDeleteError(null);
+    activeSendRef.current?.abort();
+    activeSendRef.current = null;
+    setSending(false);
+    clearTypingTimer();
+    setAwaitingReply(false);
+    setPending((message) => (message ? { ...message, status: "failed" } : null));
     try {
       await deleteConversation(conversation.id);
+      if (!mountedRef.current) return;
+      setShowDeleteConfirm(false);
       haptics.success();
       router.back();
     } catch (err: any) {
-      setLoadError(err.message);
+      if (mountedRef.current) setDeleteError(err);
+    } finally {
+      deletingRef.current = false;
+      if (mountedRef.current) setDeleting(false);
     }
-    setShowDeleteConfirm(false);
-  }, [conversation]);
+  }, [conversation, clearTypingTimer]);
 
   if (!isAuthenticated) return null;
 
@@ -460,7 +536,10 @@ export default function ChatConversationScreen() {
   }
 
   return (
-    <SafeAreaView style={[{ backgroundColor: theme.colors.background }, styles.container]}>
+    <SafeAreaView
+      edges={["top", "left", "right"]}
+      style={[{ backgroundColor: theme.colors.background }, styles.container]}
+    >
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.closeButton}
@@ -476,13 +555,17 @@ export default function ChatConversationScreen() {
             ✕
           </Text>
         </TouchableOpacity>
-        <Text style={[{ color: theme.colors.onSurface }, styles.headerTitle]}>
+        <Text numberOfLines={1} style={[{ color: theme.colors.onSurface }, styles.headerTitle]}>
           {conversation.title ||
-            (sourceId ? i18n.t("chat.newChatWithSource") : i18n.t("chat.newChat"))}
+            (conversation.sourceId ? i18n.t("chat.newChatWithSource") : i18n.t("chat.newChat"))}
         </Text>
         <TouchableOpacity
           style={styles.closeButton}
-          onPress={() => setShowDeleteConfirm(true)}
+          onPress={() => {
+            Keyboard.dismiss();
+            setDeleteError(null);
+            setShowDeleteConfirm(true);
+          }}
           accessibilityLabel={i18n.t("common.delete")}
         >
           <Text
@@ -493,106 +576,135 @@ export default function ChatConversationScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView
-        ref={messagesEndRef}
-        contentContainerStyle={styles.messagesContainer}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
       >
-        {messages.length === 0 && (
-          <View style={styles.emptyState}>
-            <Text style={[{ color: theme.colors.onSurface }, styles.emptyIllustration]}>💬</Text>
-            <Text
+        <ScrollView
+          ref={messagesEndRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.messagesContainer}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          onContentSizeChange={scrollToBottom}
+          onLayout={scrollToBottom}
+          showsVerticalScrollIndicator={false}
+        >
+          {messages.length === 0 && !pending && (
+            <View style={styles.emptyState}>
+              <Text style={[{ color: theme.colors.onSurface }, styles.emptyIllustration]}>💬</Text>
+              <Text
+                style={[
+                  { color: theme.colors.onSurface },
+                  [styles.emptyTitle, { color: theme.colors.onSurface }],
+                ]}
+              >
+                {i18n.t("chat.emptyConversation")}
+              </Text>
+              <Text style={[{ color: theme.colors.onSurface }, styles.emptyDesc]}>
+                {i18n.t("chat.placeholder")}
+              </Text>
+            </View>
+          )}
+          {messages.map((msg) => (
+            <ChatBubble
+              key={msg.id}
+              message={msg}
+              sourceId={conversation.sourceId}
+              onFollowUpPress={handleSuggestedTap}
+            />
+          ))}
+
+          {pending && (
+            <ChatBubble
+              key={pending.clientMessageId}
+              message={{
+                id: `pending-${pending.clientMessageId}`,
+                conversationId: conversation.id,
+                role: "user",
+                content: pending.content,
+                grounding: null,
+                citations: [],
+                suggestedFollowUps: [],
+                clientMessageId: pending.clientMessageId,
+                createdAt: new Date().toISOString(),
+              }}
+              status={pending.status}
+              onRetry={handleRetry}
+            />
+          )}
+
+          {awaitingReply && (
+            <View style={styles.typingIndicator} accessibilityLabel={i18n.t("chat.typing")}>
+              <ActivityIndicator size="small" color={theme.colors.onSurfaceVariant} />
+              <Text style={[{ color: theme.colors.onSurface }, styles.typingText]}>
+                {i18n.t("chat.typing")}
+              </Text>
+            </View>
+          )}
+        </ScrollView>
+
+        <View
+          style={[
+            styles.inputContainer,
+            { paddingBottom: keyboardVisible ? 12 : Math.max(insets.bottom, 12) },
+          ]}
+        >
+          <View style={styles.inputWrapper}>
+            <TextInput
+              ref={inputRef}
+              style={[{ color: theme.colors.onSurface }, styles.textInput]}
+              placeholder={i18n.t("chat.placeholder")}
+              value={text}
+              onChangeText={setText}
+              multiline
+              maxLength={MAX_MESSAGE_CHARS}
+              placeholderTextColor={theme.colors.onSurfaceVariant}
+              onSubmitEditing={handleSend}
+              blurOnSubmit={false}
+              editable
+              accessibilityLabel={i18n.t("chat.placeholder")}
+            />
+            <TouchableOpacity
               style={[
-                { color: theme.colors.onSurface },
-                [styles.emptyTitle, { color: theme.colors.onSurface }],
+                styles.sendButton,
+                (!text.trim() || sending || deleting) && styles.sendButtonDisabled,
               ]}
+              onPress={handleSend}
+              disabled={!text.trim() || sending || deleting}
+              activeOpacity={0.8}
+              accessibilityLabel={i18n.t("chat.send")}
+              accessibilityRole="button"
             >
-              {i18n.t("chat.emptyConversation")}
-            </Text>
-            <Text style={[{ color: theme.colors.onSurface }, styles.emptyDesc]}>
-              {i18n.t("chat.placeholder")}
-            </Text>
+              {sending ? (
+                <ActivityIndicator color={theme.colors.onPrimary} />
+              ) : (
+                <Text
+                  style={[
+                    { color: theme.colors.onSurface },
+                    { color: theme.colors.onPrimary, fontSize: 20 },
+                  ]}
+                >
+                  ➤
+                </Text>
+              )}
+            </TouchableOpacity>
           </View>
-        )}
-        {messages.map((msg) => (
-          <ChatBubble
-            key={msg.id}
-            message={msg}
-            sourceId={conversation.sourceId}
-            onFollowUpPress={handleSuggestedTap}
-          />
-        ))}
-
-        {pending && (
-          <ChatBubble
-            key={pending.clientMessageId}
-            message={{
-              id: `pending-${pending.clientMessageId}`,
-              conversationId: conversation.id,
-              role: "user",
-              content: pending.content,
-              grounding: null,
-              citations: [],
-              suggestedFollowUps: [],
-              clientMessageId: pending.clientMessageId,
-              createdAt: new Date().toISOString(),
-            }}
-            status={pending.status}
-            onRetry={handleRetry}
-          />
-        )}
-
-        {awaitingReply && (
-          <View style={styles.typingIndicator} accessibilityLabel={i18n.t("chat.typing")}>
-            <ActivityIndicator size="small" color={theme.colors.onSurfaceVariant} />
-            <Text style={[{ color: theme.colors.onSurface }, styles.typingText]}>
-              {i18n.t("chat.typing")}
-            </Text>
-          </View>
-        )}
-      </ScrollView>
-
-      <View style={styles.inputContainer}>
-        <View style={styles.inputWrapper}>
-          <TextInput
-            ref={inputRef}
-            style={[{ color: theme.colors.onSurface }, styles.textInput]}
-            placeholder={i18n.t("chat.placeholder")}
-            value={text}
-            onChangeText={setText}
-            multiline
-            maxLength={MAX_MESSAGE_CHARS}
-            placeholderTextColor={theme.colors.outlineVariant}
-            onSubmitEditing={handleSend}
-            blurOnSubmit={false}
-            editable
-            accessibilityLabel={i18n.t("chat.placeholder")}
-          />
-          <TouchableOpacity
-            style={[styles.sendButton, sending && styles.sendButtonDisabled]}
-            onPress={handleSend}
-            disabled={!text.trim() || sending}
-            activeOpacity={0.8}
-            accessibilityLabel={i18n.t("chat.send")}
-          >
-            <Text
-              style={[
-                { color: theme.colors.onSurface },
-                { color: theme.colors.onPrimary, fontSize: 20 },
-              ]}
-            >
-              ➤
-            </Text>
-          </TouchableOpacity>
+          <Text style={[{ color: theme.colors.onSurface }, styles.charCount]}>
+            {i18n.t("chat.charLimit", { count: text.length, max: MAX_MESSAGE_CHARS })}
+          </Text>
         </View>
-        <Text style={[{ color: theme.colors.onSurface }, styles.charCount]}>
-          {i18n.t("chat.charLimit", { count: text.length, max: MAX_MESSAGE_CHARS })}
-        </Text>
-      </View>
+      </KeyboardAvoidingView>
 
       {showDeleteConfirm && (
-        <Modal visible={showDeleteConfirm} animationType="slide" transparent>
+        <Modal
+          visible={showDeleteConfirm}
+          animationType="fade"
+          transparent
+          onRequestClose={() => {
+            if (!deleting) setShowDeleteConfirm(false);
+          }}
+        >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <Text
@@ -601,8 +713,9 @@ export default function ChatConversationScreen() {
                   [styles.modalTitle, { color: theme.colors.onSurface }],
                 ]}
               >
-                {i18n.t("common.delete")}
+                {i18n.t("chat.deleteTitle")}
               </Text>
+              {deleteError ? <ErrorState error={deleteError} /> : null}
               <Text
                 style={[
                   { color: theme.colors.onSurface },
@@ -613,22 +726,31 @@ export default function ChatConversationScreen() {
               </Text>
               <View style={styles.modalButtons}>
                 <TouchableOpacity
-                  style={styles.modalButtonCancel}
+                  style={[styles.modalButton, styles.modalButtonCancel]}
+                  accessibilityRole="button"
+                  disabled={deleting}
                   onPress={() => setShowDeleteConfirm(false)}
                   activeOpacity={0.9}
                 >
-                  <Text style={[{ color: theme.colors.onSurface }, styles.modalButtonTextCancel]}>
+                  <Text style={[styles.modalButtonText, styles.modalButtonTextCancel]}>
                     {i18n.t("common.cancel")}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.modalButtonConfirm}
+                  style={[styles.modalButton, styles.modalButtonConfirm]}
+                  accessibilityRole="button"
+                  accessibilityLabel={i18n.t("chat.deleteTitle")}
+                  disabled={deleting}
                   onPress={handleDelete}
                   activeOpacity={0.9}
                 >
-                  <Text style={[{ color: theme.colors.onSurface }, styles.modalButtonTextConfirm]}>
-                    {i18n.t("common.delete")}
-                  </Text>
+                  {deleting ? (
+                    <ActivityIndicator color={theme.colors.onError} />
+                  ) : (
+                    <Text style={[styles.modalButtonText, styles.modalButtonTextConfirm]}>
+                      {i18n.t("common.delete")}
+                    </Text>
+                  )}
                 </TouchableOpacity>
               </View>
             </View>
