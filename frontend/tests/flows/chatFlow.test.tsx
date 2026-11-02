@@ -10,15 +10,18 @@ import { lightPaperTheme } from "@/theme/paperTheme";
  *  - the Retry reuses the same clientMessageId and Idempotency-Key
  *  - the Idempotency-Key is a UUID (the backend rejects everything else)
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react-native";
+import { act, fireEvent, render, screen, userEvent, waitFor } from "@testing-library/react-native";
 import React from "react";
+import { Keyboard } from "react-native";
 import { PaperProvider } from "react-native-paper";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
 const mockGetConversation = jest.fn();
 const mockGetMessages = jest.fn();
 const mockSendMessage = jest.fn();
 const mockCreateConversation = jest.fn();
 const mockDeleteConversation = jest.fn();
+let mockSearchParams: { conversationId: string; sourceId?: string } = { conversationId: "conv-1" };
 
 jest.mock("expo-router", () => ({
   router: {
@@ -28,7 +31,7 @@ jest.mock("expo-router", () => ({
     dismiss: jest.fn(),
   },
   useRouter: () => ({ back: jest.fn(), push: jest.fn(), replace: jest.fn() }),
-  useLocalSearchParams: () => ({ conversationId: "conv-1" }),
+  useLocalSearchParams: () => mockSearchParams,
 }));
 
 jest.mock("@/auth/AuthProvider", () => ({
@@ -97,9 +100,16 @@ function userMessage(content: string, clientMessageId: string) {
 
 function renderScreen() {
   return render(
-    <PaperProvider theme={lightPaperTheme}>
-      <ChatConversationScreen />
-    </PaperProvider>,
+    <SafeAreaProvider
+      initialMetrics={{
+        frame: { x: 0, y: 0, width: 390, height: 844 },
+        insets: { top: 44, bottom: 34, left: 0, right: 0 },
+      }}
+    >
+      <PaperProvider theme={lightPaperTheme}>
+        <ChatConversationScreen />
+      </PaperProvider>
+    </SafeAreaProvider>,
   );
 }
 
@@ -119,8 +129,14 @@ async function waitForInput() {
 }
 
 describe("chat conversation flow", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
+    jest.spyOn(Keyboard, "addListener").mockImplementation(() => ({ remove: jest.fn() }));
+    await i18n.changeLanguage("th");
+    mockSearchParams = { conversationId: "conv-1" };
+    mockSendMessage.mockReset();
+    mockCreateConversation.mockReset().mockResolvedValue(conversation);
+    mockDeleteConversation.mockReset().mockResolvedValue(undefined);
     mockGetConversation.mockResolvedValue(conversation);
     mockGetMessages.mockResolvedValue({ items: [], nextCursor: null });
   });
@@ -154,6 +170,8 @@ describe("chat conversation flow", () => {
       expect(screen.getByText(i18n.t("chat.sending"))).toBeTruthy();
     });
     expect(screen.getByText("สรุปให้หน่อย")).toBeTruthy();
+    expect(screen.getByPlaceholderText(i18n.t("chat.placeholder"))).toHaveDisplayValue("");
+    expect(screen.queryByText(i18n.t("chat.emptyConversation"))).toBeNull();
 
     resolveSend?.({
       userMessage: userMessage("สรุปให้หน่อย", "cm-1"),
@@ -226,6 +244,154 @@ describe("chat conversation flow", () => {
   it("generates valid UUIDs for the idempotency keys", () => {
     expect(generateUuid()).toMatch(UUID_PATTERN);
     expect(generateUuid()).not.toBe(generateUuid());
+  });
+
+  it("preserves the next draft when an earlier message finishes", async () => {
+    let resolveSend: (value: unknown) => void = () => {};
+    mockSendMessage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    await renderScreen();
+    await waitForInput();
+    await typeMessage("first message");
+    void pressSend();
+    await waitFor(() => expect(mockSendMessage).toHaveBeenCalledTimes(1));
+    await typeMessage("next draft");
+    await act(async () =>
+      resolveSend({
+        userMessage: userMessage("first message", "cm-1"),
+        assistantMessage: assistantMessage("reply"),
+      }),
+    );
+    expect(screen.getByPlaceholderText(i18n.t("chat.placeholder"))).toHaveDisplayValue(
+      "next draft",
+    );
+  });
+
+  it("sends only once when the send button is pressed twice quickly", async () => {
+    let resolveSend: (value: unknown) => void = () => {};
+    mockSendMessage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const rendered = await renderScreen();
+    await waitForInput();
+    await typeMessage("one message");
+    const button = rendered.getByRole("button", { name: i18n.t("chat.send") });
+    await userEvent.press(button);
+    await userEvent.press(button);
+    await waitFor(() => expect(mockSendMessage).toHaveBeenCalledTimes(1));
+    await act(async () =>
+      resolveSend({
+        userMessage: userMessage("one message", "cm-1"),
+        assistantMessage: assistantMessage("reply"),
+      }),
+    );
+  });
+
+  it("cancels the request when leaving a conversation", async () => {
+    mockSendMessage.mockImplementation(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("Request canceled")));
+        }),
+    );
+    const rendered = await renderScreen();
+    await waitForInput();
+    await typeMessage("one message");
+    const completion = pressSend();
+    await waitFor(() => expect(mockSendMessage).toHaveBeenCalledTimes(1));
+    const signal = mockSendMessage.mock.calls[0][0].signal as AbortSignal;
+    await rendered.unmount();
+    await completion;
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("reuses retry IDs when the failed text is sent with the send button", async () => {
+    mockSendMessage.mockRejectedValueOnce(new Error("offline"));
+    mockSendMessage.mockResolvedValueOnce({
+      userMessage: userMessage("retry this", "cm-1"),
+      assistantMessage: assistantMessage("reply"),
+    });
+    await renderScreen();
+    await waitForInput();
+    await typeMessage("retry this");
+    await pressSend();
+    await waitFor(() => expect(screen.getByTestId("chat-bubble-retry")).toBeTruthy());
+    await pressSend();
+    expect(mockSendMessage.mock.calls[1][0].idempotencyKey).toBe(
+      mockSendMessage.mock.calls[0][0].idempotencyKey,
+    );
+    expect(mockSendMessage.mock.calls[1][0].clientMessageId).toBe(
+      mockSendMessage.mock.calls[0][0].clientMessageId,
+    );
+  });
+
+  it.each(["th", "en"])(
+    "shows a translated delete dialog and deletes once (%s)",
+    async (language) => {
+      await i18n.changeLanguage(language);
+      await renderScreen();
+      await waitForInput();
+      await fireEvent.press(screen.getByLabelText(i18n.t("common.delete")));
+      expect(screen.getByText(i18n.t("chat.deleteConfirm"))).toBeTruthy();
+      expect(screen.queryByText("deleteConfirm")).toBeNull();
+      await fireEvent.press(screen.getByRole("button", { name: i18n.t("chat.deleteTitle") }));
+      expect(mockDeleteConversation).toHaveBeenCalledTimes(1);
+      expect(mockDeleteConversation).toHaveBeenCalledWith("conv-1");
+    },
+  );
+
+  it("aborts an in-flight reply when the conversation is deleted", async () => {
+    let resolveSend: (value: unknown) => void = () => {};
+    mockSendMessage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    await renderScreen();
+    await waitForInput();
+    await typeMessage("first message");
+    void pressSend();
+    await waitFor(() => expect(mockSendMessage).toHaveBeenCalledTimes(1));
+    const signal = mockSendMessage.mock.calls[0][0].signal as AbortSignal;
+    await fireEvent.press(screen.getByLabelText(i18n.t("common.delete")));
+    await fireEvent.press(screen.getByRole("button", { name: i18n.t("chat.deleteTitle") }));
+    expect(signal.aborted).toBe(true);
+    await act(async () =>
+      resolveSend({
+        userMessage: userMessage("first message", "cm-1"),
+        assistantMessage: assistantMessage("late reply"),
+      }),
+    );
+    expect(screen.queryByText("late reply")).toBeNull();
+  });
+
+  it("keeps the conversation available when deletion fails", async () => {
+    mockDeleteConversation.mockRejectedValue(new Error("Deletion unavailable"));
+    await renderScreen();
+    await waitForInput();
+    await fireEvent.press(screen.getByLabelText(i18n.t("common.delete")));
+    await fireEvent.press(screen.getByRole("button", { name: i18n.t("chat.deleteTitle") }));
+    expect(screen.getByText("Deletion unavailable")).toBeTruthy();
+    await fireEvent.press(screen.getByRole("button", { name: i18n.t("common.cancel") }));
+    expect(screen.getByPlaceholderText(i18n.t("chat.placeholder"))).toBeTruthy();
+  });
+
+  it("reuses a newly created conversation if loading its messages needs a retry", async () => {
+    mockSearchParams = { conversationId: "new" };
+    mockGetMessages.mockRejectedValueOnce(new Error("Temporary load failure"));
+    await renderScreen();
+    await waitFor(() => expect(screen.getByText(i18n.t("common.retry"))).toBeTruthy());
+    await fireEvent.press(screen.getByText(i18n.t("common.retry")));
+    await waitForInput();
+    expect(mockCreateConversation).toHaveBeenCalledTimes(1);
   });
 
   it("shows a retryable error state when the conversation cannot be loaded", async () => {
