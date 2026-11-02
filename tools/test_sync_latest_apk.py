@@ -24,7 +24,7 @@ class CdnUploadTests(unittest.TestCase):
         self.assertNotIn("unit-test-token", " ".join(command))
         self.assertIn("key=unit-test-token", kwargs["input"])
         self.assertIn("path=%2Fapks%2F", kwargs["input"])
-        response = {"url": "https://objects.example/apks/random.apk", "size": self.apk.stat().st_size}
+        response = {"url": "https://old-host.example/apks/random.apk", "filename": "apks/random.apk", "size": self.apk.stat().st_size}
         Path(command[command.index("--output") + 1]).write_text(json.dumps(response))
         return subprocess.CompletedProcess(command, 0, "201", "")
 
@@ -34,7 +34,15 @@ class CdnUploadTests(unittest.TestCase):
         run.side_effect = self.successful_response
         download.return_value = io.BytesIO(self.apk.read_bytes())
         url = sync.upload_cdn(self.apk, "https://cdn.example/upload", "/apks/")
-        self.assertEqual(url, "https://objects.example/apks/random.apk")
+        self.assertEqual(url, "https://cdn.example/apks/random.apk")
+
+    @patch.object(sync, "urlopen")
+    @patch.object(sync.subprocess, "run")
+    def test_uses_configured_public_host_with_returned_file_path(self, run, download):
+        run.side_effect = self.successful_response
+        download.return_value = io.BytesIO(self.apk.read_bytes())
+        url = sync.upload_cdn(self.apk, "https://upload.example/upload", "/apks/", "https://cdn.example")
+        self.assertEqual(url, "https://cdn.example/apks/random.apk")
 
     @patch.object(sync, "urlopen")
     @patch.object(sync.subprocess, "run")
