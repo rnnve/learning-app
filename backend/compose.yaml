@@ -42,8 +42,10 @@ services:
     environment:
       DATABASE_URL: postgres://thaistudy:${POSTGRES_PASSWORD:-change-me}@db:5432/thaistudy
       STORAGE_DIR: /data/storage
+      JSON_DB_PATH: /data/db/db.json
     volumes:
       - storage:/data/storage
+      - appdata:/data/db
     depends_on:
       db:
         condition: service_healthy
@@ -53,3 +55,4 @@ services:
 volumes:
   pgdata:
   storage:
+  appdata:
