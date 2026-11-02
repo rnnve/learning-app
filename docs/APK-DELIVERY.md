@@ -2,7 +2,8 @@
 
 The `Sync latest APK` GitHub Actions workflow checks Expo every 30 minutes for the
 newest successful Android `preview` build. It downloads the APK, validates its ZIP,
-package (`cc.rynni.studyapp`) and API URL, and calculates SHA-256 before uploading
+package (`cc.rynni.studyapp`), API URL, Android signature, signing certificate and
+ZIP alignment, and calculates SHA-256 before uploading
 the file to `https://cdn.rynni.cc/upload` under `/apks/`.
 
 The CDN uses a multipart field named `file`, with `key` and `path` query
@@ -37,7 +38,11 @@ syncs existing builds; it does not start additional Expo builds.
 
 The `preview` EAS profile builds both `armeabi-v7a` and `arm64-v8a` for Android
 phones. It excludes x86/x86-64 libraries used by Intel devices and emulators,
-and enables R8 minification and resource shrinking. The `universal` profile
+and enables R8 minification. From 1.0.4 it uses compressed native library
+packaging (libraries are extracted during installation), with resource shrinking
+disabled for the Galaxy A13 installation compatibility test. This is a testable
+packaging change, not a confirmed diagnosis of the device's installer failure.
+The `universal` profile
 includes all four architectures when needed, but its APK may exceed the CDN
 upload limit. The package and signing key remain the same.
 
