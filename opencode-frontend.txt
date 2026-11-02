@@ -1,0 +1,881 @@
+================================================================================
+OPENCODE INSTRUCTIONS: FRONTEND (Expo / React Native)  --  "Thai AI Study" app
+File: opencode-frontend.txt       Contract version: v1
+================================================================================
+
+0. HOW TO USE THIS FILE (READ FIRST)
+--------------------------------------------------------------------------------
+You are a coding agent. Implement the MOBILE APP of an AI-powered learning app
+for students in Thailand. A separate agent implements the ElysiaJS backend from
+opencode-backend.txt. Both files contain the identical "SHARED API CONTRACT"
+(Section 3). The contract wins over assumptions. If you must deviate or find a
+contract problem, record it in docs/CONTRACT-NOTES.md instead of silently
+changing behavior.
+
+PROJECT ROOT: the current working directory that contains this file. Do not
+create or modify files outside it (do not touch the backend project).
+
+BEFORE CHANGING ANYTHING:
+ 1. Run `pwd`, `ls -la`; read package.json, app.json/app.config.*, tsconfig,
+    biome.json, bun.lock, babel/metro/tailwind configs, README if present.
+ 2. If an Expo project already exists, KEEP it: inspect its SDK version, router
+    choice, and dependencies; extend rather than regenerate. Only if the
+    directory has no app, scaffold one (`bun create expo-app@latest . --template
+    default` or the current documented equivalent; verify in Expo docs).
+ 3. Never delete user files, never run destructive git commands, never overwrite
+    .env files. Create docs/IMPLEMENTATION-NOTES.md with what exists, what you
+    will add, assumptions; keep it current.
+ 4. Follow the milestones in Section 14 and run the verification commands
+    after each one.
+
+HARD RULES:
+ - No API keys or provider credentials in the app. The app talks ONLY to our
+   backend. The only config is EXPO_PUBLIC_API_URL (public by design).
+ - Use only libraries compatible with the installed Expo SDK; install with
+   `bunx expo install <pkg>` so versions match the SDK. Check each library's
+   docs for Expo Go support BEFORE adopting it. Never claim Expo Go supports
+   something you did not verify; write real findings in docs/EXPO-GO-NOTES.md.
+ - Never present fixture/mock AI output as real: when the backend reports
+   fixture mode (meta.ai.* == "fixture" or material.generatedBy.mode ==
+   "fixture"), show a persistent visible "ข้อมูลจำลองเพื่อการทดสอบ" banner.
+ - Never show generated study material for a source before the user has seen the
+   source and its extraction status (Section 9.6/9.7).
+ - No dead buttons, no screens with hard-coded fake data. Every screen talks to
+   the real backend contract. Development fixtures belong ONLY in tests.
+ - Do not over-engineer: no Redux, no custom navigation library, no offline-first
+   sync engine.
+
+1. ARCHITECTURE DECISIONS (ALREADY MADE)
+--------------------------------------------------------------------------------
+ - Expo (latest stable SDK at implementation time) + the React Native version
+   that SDK pins; TypeScript strict; Expo Router (file-based) for navigation;
+   Bun for install/scripts; Biome for format+lint (no ESLint/Prettier).
+ - UI: React Native Paper (Material 3) for components and theming; NativeWind
+   for layout/spacing utilities. ONE token source (src/theme/tokens.ts) feeds
+   both the Paper theme and tailwind.config.js, so they never diverge. Use
+   NativeWind's version that the NativeWind docs state is compatible with the
+   installed Expo SDK (prefer the stable release line; do not adopt a preview
+   line unless it is the documented path for that SDK) and its required Babel/
+   Metro setup. Verify Paper + NativeWind together render in Expo Go.
+ - Server state: TanStack Query. Client/UI state: small React context +
+   `useState`; use Zustand only if a store genuinely helps (auth/session and
+   preferences). HTTP: Axios with a typed client and interceptors.
+ - Auth: guest-first. On first launch (after onboarding consent) create a guest
+   account so the student can start immediately; offer "save my progress" ->
+   register/upgrade (same account, data kept). Access token in memory; refresh
+   token in expo-secure-store.
+ - i18n: i18next + react-i18next + expo-localization. The default UI language
+   is ALWAYS Thai, whatever the device locale. English is offered on the
+   language screen and in Settings; persist the choice locally (AsyncStorage or
+   SecureStore) and sync it to preferences.uiLanguage on the server.
+ - Glass effects: purely decorative progressive enhancement (Section 12).
+ - Types: hand-written typed API layer from the contract in Section 3
+   (src/api/types.ts). If the backend is running, the optional script
+   `bun run gen:api` may generate types from /openapi.json via openapi-typescript
+   for CROSS-CHECKING only; the committed hand-written types are authoritative.
+
+2. PROJECT LAYOUT (adapt to the existing project)
+--------------------------------------------------------------------------------
+  app/                                  Expo Router routes
+    _layout.tsx                         providers, fonts, splash, auth gate
+    index.tsx                           redirect (onboarding vs tabs)
+    (onboarding)/welcome.tsx  language.tsx  consent.tsx
+    (tabs)/_layout.tsx
+    (tabs)/home.tsx  library.tsx  chat.tsx  settings.tsx
+    capture.tsx                         camera (modal/fullscreen)
+    capture-review.tsx                  review photos, add page, retake, upload
+    import.tsx                          gallery + document picker entry (sheet)
+    source/[id]/index.tsx               processing -> preview (one screen, states)
+    source/[id]/text.tsx                full extracted text (paged chunks)
+    source/[id]/generate.tsx            options sheet for summary/cards/quiz
+    material/[id].tsx                   renders summary | flashcards | quiz (overview)
+    study/flashcards/[materialId].tsx   flashcard study session
+    study/quiz/[materialId].tsx         quiz session
+    study/result/[sessionId].tsx        results + review of mistakes
+    chat/[conversationId].tsx           conversation
+    history.tsx                         study history (sessions) + job history
+    auth/sign-in.tsx  auth/register.tsx
+  src/
+    api/{client.ts,types.ts,errors.ts,endpoints/*.ts,queryKeys.ts}
+    auth/{session.ts,tokenStore.ts,AuthProvider.tsx}
+    features/{sources,materials,chat,study,home,settings}/ (hooks + components)
+    components/ui/      GlassSurface, PrimaryButton, Card, EmptyState,
+                        ErrorState, LoadingState, ProgressSteps, Banner,
+                        SourceRefChip, LanguageToggle, ConfirmDialog
+    i18n/{index.ts,th.json,en.json}
+    theme/{tokens.ts,paperTheme.ts,fonts.ts}
+    lib/{format.ts,uuid.ts,network.ts,imageUtils.ts,haptics.ts}
+  assets/ (icon, splash, fonts if bundled)
+  tests/ (unit + component), docs/, biome.json, tailwind.config.js,
+  babel.config.js, metro.config.js, global.css, nativewind-env.d.ts, bunfig.toml
+
+3. SHARED API CONTRACT v1  (IDENTICAL IN BOTH INSTRUCTION FILES)
+--------------------------------------------------------------------------------
+3.1 Conventions
+ - Base path: /v1. JSON, UTF-8, camelCase. Timestamps: ISO-8601 UTC strings.
+   IDs: UUID strings.
+ - Auth header on every endpoint except those marked PUBLIC:
+       Authorization: Bearer <accessToken>
+ - Optional request headers: Accept-Language (th|en; only picks the language of
+   the human-readable `message` in errors), X-Request-Id (echoed back).
+ - Idempotency-Key (UUID, client generated) is REQUIRED on: POST /v1/sources,
+   POST /v1/materials, POST /v1/conversations/:id/messages. Same key + same
+   body => the original response is replayed. Same key + different body =>
+   422 IDEMPOTENCY_KEY_REUSED. Same key while the first call is in flight =>
+   409 REQUEST_IN_PROGRESS. Keys are kept 24 h.
+ - Pagination (list endpoints): query `limit` (1..50, default 20) and `cursor`
+   (opaque string). Response: { "items": [...], "nextCursor": string | null }.
+   Lists are ordered newest first unless stated.
+ - Success with no body: 204.
+
+3.2 Error format (every non-2xx response)
+   { "error": { "code": "STRING_CODE", "message": "human readable",
+                "retryable": boolean, "requestId": "uuid",
+                "details": { ... } | null } }
+ `Job.error` and `Source.error` use the same object WITHOUT `requestId`.
+ The frontend maps `code` to localized Thai/English text; `message` is only a
+ fallback. Never put stack traces or provider internals in errors.
+
+ CODE                       HTTP  retryable  meaning
+ VALIDATION_ERROR           422   false      body/query invalid; details.fields[]
+ UNAUTHENTICATED            401   false      missing/invalid access token
+ TOKEN_EXPIRED              401   true       access token expired -> refresh
+ INVALID_CREDENTIALS        401   false      bad email/password
+ REFRESH_TOKEN_INVALID      401   false      refresh token unknown/expired
+ REFRESH_TOKEN_REUSED       401   false      reuse detected; session family revoked
+ FORBIDDEN                  403   false      action not allowed
+ CONSENT_REQUIRED           403   false      user has not accepted AI processing
+ NOT_FOUND                  404   false      missing OR not owned by caller
+ EMAIL_TAKEN                409   false      registration email exists
+ REQUEST_IN_PROGRESS        409   true       duplicate in-flight idempotent call
+ SOURCE_NOT_READY           409   true       source still processing or failed
+ JOB_NOT_RETRYABLE          409   false      job state does not allow retry/cancel
+ IDEMPOTENCY_KEY_REUSED     422   false      key reused with a different body
+ FILE_TOO_LARGE             413   false      details.maxBytes
+ UNSUPPORTED_MEDIA_TYPE     415   false      type not allowed OR content != claimed
+ TOO_MANY_FILES             422   false      details.maxFiles
+ FILE_CORRUPT               422   false      cannot be parsed
+ PDF_ENCRYPTED              422   false      password-protected document
+ TOO_MANY_PAGES             422   false      details.maxPages
+ RATE_LIMITED               429   true       details.retryAfterSec
+ QUOTA_EXCEEDED             429   false      daily AI quota; details.resetsAt
+ AI_NOT_CONFIGURED          503   false      provider/model env missing
+ AI_PROVIDER_UNAVAILABLE    503   true       provider 5xx/429/network (after retries)
+ AI_TIMEOUT                 504   true       provider timed out (after retries)
+ AI_CONTENT_BLOCKED         422   false      provider safety block
+ AI_OUTPUT_INVALID          502   true       model output failed validation after repair
+ IMAGE_UNREADABLE           422   false      (job error) nothing legible in image(s)
+ NO_EXTRACTABLE_CONTENT     422   false      (job error) no usable text found
+ EXTRACTION_FAILED          502   true       (job error) extraction provider failure
+ INTERNAL_ERROR             500   true       unexpected
+
+3.3 Enums
+ Language          "th" | "en"
+ ContentLanguage   "auto" | "th" | "en"      (auto = follow the source language)
+ Level             "primary" | "lower_secondary" | "upper_secondary" |
+                   "university" | "general"  (ป.1-6, ม.1-3, ม.4-6, มหาวิทยาลัย, ทั่วไป)
+ Theme             "system" | "light" | "dark"
+ SourceKind        "images" | "txt" | "pdf" | "docx"
+ SourceStatus      "queued" | "processing" | "ready" | "partial" | "failed"
+ DetectedLanguage  "th" | "en" | "mixed" | "unknown"
+ ExtractionMethod  "direct_text" | "vision_ocr" | "hybrid"
+ ExtractionQuality "good" | "fair" | "poor" | "unreadable"
+ JobType           "source_processing" | "generate_summary" |
+                   "generate_flashcards" | "generate_quiz"
+ JobStatus         "queued" | "running" | "succeeded" | "failed" | "canceled"
+ MaterialType      "summary" | "flashcards" | "quiz"
+ GenerationMode    "live" | "fixture"
+ Grounding         "source" | "general" | "mixed" | "insufficient_source"
+ QuestionType      "multiple_choice" | "true_false" | "short_answer"
+ Difficulty        "easy" | "medium" | "hard" | "mixed"
+ CardRating        "again" | "hard" | "good" | "easy"
+ Verdict           "correct" | "partially_correct" | "incorrect"
+
+3.4 Core objects
+ AuthTokens   { accessToken, accessTokenExpiresAt, refreshToken,
+                refreshTokenExpiresAt }
+ Preferences  { uiLanguage: Language, contentLanguage: ContentLanguage,
+                level: Level, theme: Theme }
+                defaults: th, auto, general, system
+ User         { id, email: string|null, displayName: string, isGuest: boolean,
+                preferences: Preferences,
+                consent: { aiProcessing: boolean, version: string|null,
+                           acceptedAt: string|null },
+                createdAt }
+ AuthResponse { user: User, tokens: AuthTokens }
+
+ ExtractionWarning { code: string, message: string, page: number|null }
+ Extraction   { method: ExtractionMethod|null, quality: ExtractionQuality|null,
+                pagesTotal: number, pagesExtracted: number,
+                pagesFailed: number[], warnings: ExtractionWarning[] }
+ Source       { id, title, kind: SourceKind, originalFilenames: string[],
+                sizeBytes: number, pageCount: number,
+                fileCount: number,          // images: number of photos; else 1
+                language: DetectedLanguage, charCount: number,
+                status: SourceStatus, extraction: Extraction,
+                error: ErrorBody|null, jobId: string|null,
+                createdAt, updatedAt }
+   - `ready`   = extraction fully succeeded (warnings possible, e.g. embedded
+                 images not analyzed).
+   - `partial` = some pages failed/unreadable but usable text exists.
+   - `failed`  = nothing usable; `error` explains.
+ SourceChunk  { id, index: number, page: number|null, text: string,
+                charCount: number }
+   chunk ids are stable strings of the form "c<index>" within a source
+   (e.g. "c0", "c14"); SourceRef.chunkId uses the same form.
+ SourceRef    { chunkId: string, page: number|null, quote: string|null }
+   `quote` is non-null ONLY if the backend verified it is a verbatim substring
+   of that chunk (<= 200 chars). Otherwise null.
+
+ Job          { id, type: JobType, status: JobStatus,
+                stage: string|null, progress: number /*0..100*/,
+                detail: { page?: number, pagesTotal?: number } | null,
+                attempt: number, error: ErrorBody|null,
+                result: { sourceId?: string, materialId?: string } | null,
+                createdAt, startedAt: string|null, finishedAt: string|null }
+   stages  source_processing: validating, normalizing_images, extracting_text,
+                              ocr, chunking, finalizing
+           generate_*:        preparing_context, generating, validating_output,
+                              saving
+ GeneratedBy  { provider: "gemini"|"fake", model: string, promptVersion: string,
+                mode: GenerationMode }
+
+ Material     { id, type: MaterialType, sourceId: string|null, title,
+                content: SummaryContent | FlashcardsContent | QuizContent,
+                options: object, isSaved: boolean, generatedBy: GeneratedBy,
+                createdAt, updatedAt }
+   `isSaved` is a user bookmark. ALL generated materials are persisted and
+   appear in history/library; "Saved" is the starred subset.
+ Text fields in content are PLAIN TEXT with line breaks. No LaTeX, no HTML.
+ Math is written in readable Unicode (x², √(a+b), ½, π, →, ≤).
+ Every content object has `sourceRefs` arrays where noted; they may be empty.
+
+ SummaryContent {
+   overview: string,
+   keyPoints:  [{ text: string, sourceRefs: SourceRef[] }],
+   sections:   [{ heading: string, body: string, sourceRefs: SourceRef[] }],
+   glossary:   [{ term: string, definition: string }],
+   limitations: string[]    // honest notes: unreadable parts, missing context
+ }
+ FlashcardsContent { cards: [{ id: string, front: string, back: string,
+                               hint: string|null, tags: string[],
+                               sourceRefs: SourceRef[] }] }
+ QuizContent { questions: [{
+     id: string, type: QuestionType, prompt: string,
+     choices: [{ id: string, text: string }] | null,   // MC (3-5) / TF (2)
+     correctChoiceId: string | null,                   // MC / TF
+     acceptedAnswers: string[] | null,                 // short_answer
+     modelAnswer: string | null,                       // short_answer
+     explanation: string, difficulty: "easy"|"medium"|"hard",
+     sourceRefs: SourceRef[] }] }
+
+ Conversation { id, title, sourceId: string|null, lastMessagePreview: string|null,
+                createdAt, updatedAt }
+ Message      { id, conversationId, role: "user"|"assistant", content: string,
+                grounding: Grounding|null, citations: SourceRef[],
+                suggestedFollowUps: string[], clientMessageId: string|null,
+                createdAt }
+                (user messages: grounding null, citations [], followUps [])
+ StudySession { id, materialId, mode: "flashcards"|"quiz",
+                status: "active"|"completed", itemsTotal, itemsAnswered,
+                score: number|null /*0..1, quiz only, set on complete*/,
+                startedAt, completedAt: string|null }
+ AnswerResult { itemId, verdict: Verdict|null /*quiz*/,
+                correctChoiceId: string|null, explanation: string|null,
+                feedback: string|null /*AI feedback for short answers*/,
+                nextDueAt: string|null /*flashcards*/ }
+
+3.5 Endpoints
+ PUBLIC
+  GET  /health                 -> 200 { status:"ok", version, uptimeSec }
+  GET  /ready                  -> 200|503 { status:"ready"|"not_ready",
+                                  checks:{ database, storage, migrations:
+                                  "ok"|"fail", nemotron, gemini:
+                                  "configured"|"not_configured" } }
+        (AI config never makes /ready fail; DB/storage/migrations do.)
+  GET  /v1/meta                -> 200 { apiVersion:"1", promptVersion,
+        limits:{ maxImageBytes, maxDocumentBytes, maxImagesPerSource,
+                 maxPdfPages, maxChatMessageChars, maxGenerationsPerDay,
+                 maxChatMessagesPerDay },
+        supported:{ imageMimeTypes:["image/jpeg","image/png","image/webp"],
+                    documentMimeTypes:[ "text/plain","application/pdf",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"] },
+        ai:{ extraction:"live"|"fixture"|"disabled",
+             generation:"live"|"fixture"|"disabled" },
+        consentVersion }
+  POST /v1/auth/guest          body {} -> 201 AuthResponse
+  POST /v1/auth/register       body { email, password(8..128), displayName? }
+        -> 201 AuthResponse. If a guest access token is sent, the guest is
+        UPGRADED IN PLACE (all data kept, isGuest=false). Else new user.
+  POST /v1/auth/login          body { email, password } -> 200 AuthResponse
+  POST /v1/auth/refresh        body { refreshToken } -> 200 { tokens }
+        (rotation: old refresh token is invalidated)
+  POST /v1/auth/logout         body { refreshToken } -> 204
+
+ AUTHENTICATED
+  GET    /v1/me                -> 200 User
+  PATCH  /v1/me                body { displayName?, preferences?: Partial<Preferences> } -> 200 User
+  PUT    /v1/me/consent        body { aiProcessing: true, version } -> 200 User
+  DELETE /v1/me                body { confirm: "DELETE" } -> 204 (hard-deletes
+                                everything: db rows + stored files)
+  GET    /v1/home              -> 200 { stats:{ sources, materials,
+                                  sessionsLast7Days }, activeJobs: Job[],
+                                  recentSources: Source[] (max 5),
+                                  recentMaterials: Material[] (max 5, no
+                                  `content` -> see MaterialSummary) }
+        MaterialSummary = Material without `content`, plus
+        `itemCount: number` (cards/questions/keyPoints).
+
+  Sources
+  POST   /v1/sources           multipart/form-data, Idempotency-Key required.
+        fields: files (repeatable file part), title? (string<=120),
+                language? ("th"|"en"; hint only)
+        rules: either 1..maxImagesPerSource image files (kind=images), OR
+        exactly one TXT/PDF/DOCX. Mixed -> 422 VALIDATION_ERROR.
+        -> 202 { source: Source (status "queued"), job: Job } + Location header
+  GET    /v1/sources           ?status&kind&q(title search)&limit&cursor
+                               -> 200 { items: Source[], nextCursor }
+  GET    /v1/sources/:id       -> 200 Source
+  PATCH  /v1/sources/:id       body { title } -> 200 Source
+  GET    /v1/sources/:id/files/:index  -> original file bytes (auth required;
+                               index 0-based; images re-encoded JPEG/PNG/WebP;
+                               documents original) with correct Content-Type,
+                               Content-Disposition: inline
+  GET    /v1/sources/:id/text  ?limit&cursor (chunks in ascending order)
+                               -> 200 { items: SourceChunk[], nextCursor }
+        409 SOURCE_NOT_READY if status queued/processing/failed.
+  POST   /v1/sources/:id/retry -> 202 { source, job }  (only if status failed
+                               or partial; re-runs processing)
+  DELETE /v1/sources/:id       ?keepMaterials=false -> 204. Deletes files,
+        chunks, and (default) all derived materials, conversations about it,
+        and their study sessions. keepMaterials=true keeps materials but sets
+        their sourceId to null and strips sourceRefs quotes (chunk ids remain
+        meaningless -> frontend hides source links when sourceId is null).
+
+  Materials
+  POST   /v1/materials         Idempotency-Key required. body:
+        { type: MaterialType, sourceId: string, title?: string,
+          options: {
+            language?: ContentLanguage (default: user preference),
+            level?: Level|"auto" (default: user preference),
+            pageRange?: { from: number, to: number } | null,
+            // summary:    length: "short"|"medium"|"detailed" (default medium)
+            // flashcards: count: 5..50 (default 15)
+            // quiz:       count: 3..30 (default 10),
+            //             difficulty: Difficulty (default mixed),
+            //             questionTypes: QuestionType[] (default all three)
+          } }
+        -> 202 { job: Job }. Errors: 409 SOURCE_NOT_READY, 403 CONSENT_REQUIRED,
+        429 QUOTA_EXCEEDED, 503 AI_NOT_CONFIGURED.
+        The server de-duplicates: an identical request (same user, source,
+        type, normalized options) whose job is queued/running returns that
+        existing job.
+  GET    /v1/materials         ?type&sourceId&saved(true|false)&q&limit&cursor
+                               -> 200 { items: MaterialSummary[], nextCursor }
+  GET    /v1/materials/:id     -> 200 Material
+  PATCH  /v1/materials/:id     body { title?, isSaved? } -> 200 Material
+  DELETE /v1/materials/:id     -> 204
+  GET    /v1/materials/:id/flashcard-progress  (flashcards only)
+                               -> 200 { items:[{ cardId, dueAt, box:1..5,
+                                  lastRating: CardRating|null }] }
+        cards never reviewed are returned with dueAt = now, box 1.
+
+  Jobs
+  GET    /v1/jobs/:id          -> 200 Job
+  GET    /v1/jobs              ?active=true -> 200 { items: Job[] }
+  POST   /v1/jobs/:id/retry    -> 202 Job (only status failed AND
+                               error.retryable true; else 409 JOB_NOT_RETRYABLE)
+  POST   /v1/jobs/:id/cancel   -> 200 Job (queued/running only)
+
+  Chat
+  POST   /v1/conversations     body { title?, sourceId?: string|null } -> 201 Conversation
+  GET    /v1/conversations     ?sourceId&limit&cursor -> 200 { items, nextCursor }
+  GET    /v1/conversations/:id -> 200 Conversation
+  PATCH  /v1/conversations/:id body { title } -> 200 Conversation
+  DELETE /v1/conversations/:id -> 204
+  GET    /v1/conversations/:id/messages ?limit&cursor
+        -> 200 { items: Message[] (newest first), nextCursor }
+  POST   /v1/conversations/:id/messages   Idempotency-Key required.
+        body { content: string(1..4000), clientMessageId: uuid,
+               language?: ContentLanguage, level?: Level|"auto" }
+        -> 201 { userMessage: Message, assistantMessage: Message }
+        SYNCHRONOUS (client timeout 60 s). On AI failure the user message is
+        NOT persisted; the client keeps the text and may retry with the same
+        Idempotency-Key. Errors: AI_* codes, 429, 403 CONSENT_REQUIRED.
+        A conversation with sourceId must reference a ready/partial source.
+        Title: if the conversation title is empty, the server sets it to the
+        first 40 chars of the first user message (no AI call).
+
+  Study
+  POST   /v1/study-sessions    body { materialId, mode:"flashcards"|"quiz" } -> 201 StudySession
+        (mode must match the material type)
+  GET    /v1/study-sessions    ?materialId&limit&cursor -> 200 { items, nextCursor }
+  GET    /v1/study-sessions/:id -> 200 { session: StudySession,
+                                  answers: [{ itemId, verdict|null,
+                                  rating|null, answeredAt }] }
+  POST   /v1/study-sessions/:id/answers
+        flashcards: body { itemId, rating: CardRating } -> 200 AnswerResult
+        quiz:       body { itemId, choiceId?: string, text?: string }
+                    -> 200 AnswerResult
+        Multiple choice/true-false are graded deterministically. short_answer
+        is graded first against acceptedAnswers (normalized); if no match, by
+        Gemini with the model answer + source context (<= 30 s). An item is
+        answered once per session; repeating returns the stored result.
+  POST   /v1/study-sessions/:id/complete -> 200 StudySession (score computed:
+        correct=1, partially_correct=0.5, incorrect=0 over itemsTotal)
+
+3.6 Limits (defaults; configurable in backend env, exposed in /v1/meta)
+  image: <= 10 MB each, <= 10 images per source, JPEG/PNG/WebP only
+         (the app converts HEIC and downsizes to <= 2048 px long edge, JPEG q~0.85)
+  document: <= 25 MB; PDF <= 100 pages; DOCX/TXT extracted text <= 1,500,000 chars
+  OCR cap for scanned PDFs: first 40 pages by default; further pages are
+         skipped with an ExtractionWarning code "OCR_PAGE_CAP".
+  chat message <= 4000 chars; generations/day = 30; chat messages/day = 200
+  rate limits: 120 req/min/IP general; 10 req/min/IP on /v1/auth/*
+
+3.7 Polling guidance (frontend)
+  Poll GET /v1/jobs/:id every 1.5 s, backing off to 4 s after 30 s; stop on
+  succeeded/failed/canceled. After source_processing succeeds, fetch the source
+  and SHOW extraction status before offering generation.
+
+4. SETUP, ENVIRONMENT, REALISTIC DEV/TEST WORKFLOW
+--------------------------------------------------------------------------------
+ - Package manager: Bun. React Native/Metro generally needs a hoisted
+   node_modules; if Metro cannot resolve packages, set `[install] linker =
+   "hoisted"` in bunfig.toml (check Bun's current docs). Scripts in package.json:
+     start (expo start), android, ios, lint (biome lint .), format (biome format
+     --write .), check:biome (biome check .), typecheck (tsc --noEmit), test
+     (jest), doctor (expo-doctor), check (= biome check . && tsc --noEmit &&
+     jest && expo-doctor).
+ - Env: EXPO_PUBLIC_API_URL (e.g. http://192.168.1.20:3000). Provide
+   .env.example (no secrets). Validate at startup (src/api/client.ts) and show a
+   clear in-app configuration error screen if missing/invalid.
+   NOTE for docs: `localhost` does NOT work from a physical phone; use the dev
+   machine's LAN IP. Android emulator uses http://10.0.2.2:3000; iOS simulator
+   can use localhost. Plain-HTTP is acceptable only for development; production
+   builds must use HTTPS (document that Android release builds block cleartext).
+ - Development with Expo Go (primary workflow): `bun install`, `bunx expo start`,
+   scan the QR with Expo Go (same Wi-Fi) or use simulators. Features that work in
+   Expo Go IF the installed SDK's Expo Go includes them (verify; write results to
+   docs/EXPO-GO-NOTES.md): expo-camera, expo-image-picker, expo-document-picker,
+   expo-file-system, expo-image-manipulator, expo-secure-store, expo-localization,
+   expo-blur, expo-haptics, expo-crypto, expo-image, @react-native-async-storage,
+   @react-native-community/netinfo. For expo-glass-effect and anything else
+   native: check the Expo docs for Expo Go support; if unsupported, do NOT make
+   the app depend on it; the fallback path (Section 12) must be what runs in Expo
+   Go. Document that a development build (`bunx expo run:ios|android` or EAS
+   Build) is required for any library Expo Go lacks.
+ - Backend for the app: run the backend project via docker compose (see its
+   README); then set EXPO_PUBLIC_API_URL. The app must be fully testable against
+   a real backend; automated tests use mocked HTTP.
+
+5. DESIGN SYSTEM (src/theme)
+--------------------------------------------------------------------------------
+ Aesthetic: calm, friendly, premium study companion. Lots of whitespace, large
+ rounded cards (radius 20-28), soft shadows, one confident accent colour,
+ gentle gradients only on hero surfaces, playful but not childish micro-
+ interactions (haptics, subtle spring animations with react-native-reanimated if
+ it works in Expo Go; respect "reduce motion").
+ Tokens (src/theme/tokens.ts): colours (light+dark; accent suggestion: indigo/
+ violet #5B5BD6 with warm coral secondary #FF7A59 and mint success #2DBE8D;
+ neutral surfaces with slight blue tint), radii, spacing scale (4pt), type scale,
+ elevation, semantic colours (success/warning/error/info, flashcard rating
+ colours: again red, hard orange, good green, easy blue). Meet WCAG AA contrast.
+ Build paperTheme.ts (MD3 light/dark) from tokens; tailwind.config.js reads the
+ same tokens (import them or generate the config values from tokens).
+ Theme preference "system|light|dark" from preferences.theme (default system).
+ Components to build (reusable, typed, with accessibilityLabel/Role props):
+   PrimaryButton, SecondaryButton, IconButton, Card, SectionHeader, Chip,
+   Banner (info/warning/error/fixture), EmptyState (illustration slot + CTA),
+   ErrorState (message from error code + Retry), LoadingState (skeletons),
+   ProgressSteps (for jobs), SourceRefChip, ConfirmDialog, BottomSheet (Paper
+   Modal/Portal or a lightweight sheet), GlassSurface (Section 12),
+   FlashCard (flip animation), QuizOption, MarkdownLiteText (plain text with
+   "-" bullets and **bold** only; NO full markdown/HTML/LaTeX rendering).
+ Illustrations: simple vector/emoji-free placeholders created with Paper icons or
+ SVG you author; no copyrighted imagery.
+
+6. THAI-FIRST I18N AND TYPOGRAPHY
+--------------------------------------------------------------------------------
+ - Files: src/i18n/th.json (complete, default) and en.json (complete). Every
+   user-visible string, accessibility label, error message, empty state, and
+   enum label (levels, languages, question types, statuses, ratings, stages,
+   warning codes) goes through t(). Add a test that th.json and en.json have the
+   same key set and no empty values.
+ - Map EVERY error code in contract 3.2 to a Thai and English message in the
+   `errors.*` namespace, plus a generic fallback. Never show raw server
+   `message` unless the code is unmapped.
+ - Thai copy: natural, friendly, student-appropriate Thai (e.g. "สแกนโน้ต",
+   "สรุปให้หน่อย", "ทบทวนแฟลชการ์ด", "ทำแบบทดสอบ", "ลองใหม่อีกครั้ง"). Avoid
+   machine-translated stiffness. Keep UI copy short.
+ - Fonts: bundle a Thai-capable family with @expo-google-fonts (e.g. Noto Sans
+   Thai or IBM Plex Sans Thai/Sarabun) via expo-font; wait for fonts before
+   hiding the splash. Define regular/medium/semibold weights. Use the same family
+   for Latin text so mixed Thai/English lines look consistent.
+ - Thai rendering rules: line-height >= 1.5x font size (tone marks/vowels are
+   clipped at tight line-heights, especially on Android); no fixed-height
+   text containers; avoid `numberOfLines` on content the student must read
+   (flashcards, questions, explanations) - allow growth/scroll; letterSpacing 0;
+   never uppercase/transform Thai; do not insert artificial spaces in Thai;
+   rely on the platform's Thai word-breaking for wrapping; test long Thai
+   strings without spaces for overflow; support Dynamic Type/font scale up to
+   at least 1.3x without layout breakage (use flexible containers, scroll views).
+ - Dates/numbers: format via Intl with the active language; note Thai locale
+   (`th-TH`) may output Buddhist-era years - that is expected in Thai UI; keep a
+   single helper (src/lib/format.ts) with unit tests for both languages. Verify
+   Intl behavior on Hermes (Android+iOS) and handle absence gracefully.
+ - Content language vs UI language are separate settings: UI language
+   (preferences.uiLanguage) and study-content language (preferences.
+   contentLanguage: auto|th|en). Always send the chosen language in generation
+   options/chat requests.
+ - Accessibility: accessibilityLabel/Hint/Role/State on all controls (in the
+   active language), min touch target 44x44, logical focus order, screen-reader
+   announcements for job progress changes and errors, don't rely on colour
+   alone (icons/text for correct/incorrect), respect reduce-motion and bold-text
+   settings.
+
+7. API LAYER (src/api)
+--------------------------------------------------------------------------------
+ - client.ts: one Axios instance (baseURL = EXPO_PUBLIC_API_URL + "/v1"; JSON
+   default; timeout 20 s; per-call overrides: uploads 180 s, chat 65 s, grading
+   35 s). Request interceptor: attach Authorization (access token from memory),
+   Accept-Language (UI language), X-Request-Id (uuid). Idempotency-Key: generate
+   a uuid ONCE per user action and reuse it on automatic or manual retries of the
+   SAME action (store it in the mutation variables / component state), required
+   for POST /sources, POST /materials, POST /conversations/:id/messages.
+ - Response interceptor: normalize all failures into ApiError { status, code,
+   message, retryable, requestId, details } (src/api/errors.ts) following
+   contract 3.2; network failures -> code "NETWORK_ERROR" (client-only code),
+   timeouts -> "CLIENT_TIMEOUT" (client-only). Map both in i18n.
+ - Token refresh: on 401 TOKEN_EXPIRED (or 401 with an expired access token)
+   perform a SINGLE-FLIGHT refresh (one shared promise), then retry the original
+   request once. If refresh fails with REFRESH_TOKEN_INVALID/REUSED -> clear
+   session, route to the welcome/sign-in flow, keep the user informed. Never
+   loop.
+ - endpoints/*.ts: one typed function per contract endpoint (auth, me, home,
+   sources, materials, jobs, conversations, study, meta). Types in types.ts
+   mirror contract 3.4 exactly (enums as string-literal unions, nullable fields
+   as `T | null`). Runtime-validate nothing heavy; do guard unknown enum values
+   defensively in UI (fallback label).
+ - queryKeys.ts: central factory (e.g. ['sources', params], ['source', id],
+   ['job', id], ['material', id], ['materials', params], ['conversations'],
+   ['messages', id], ['home'], ['meta'], ['studySessions', params]).
+ - TanStack Query defaults: staleTime 30 s, retry 2 for GET (not for 4xx other
+   than 429/408), no retry for mutations by default, refetchOnReconnect on,
+   refetchOnWindowFocus mapped to AppState "active" via focusManager, network
+   state via onlineManager + NetInfo. Mutations invalidate relevant keys.
+ - Job polling hook useJob(jobId): refetchInterval 1500 ms for the first 30 s,
+   then 4000 ms; stop when status is terminal; pause while app is backgrounded
+   or offline; on `succeeded` invalidate ['source', id]/['materials']/['home'].
+   Persist active job ids in memory so leaving/re-entering a screen resumes
+   polling; the Home screen also shows `activeJobs` from /v1/home.
+ - Pagination: useInfiniteQuery with `nextCursor`.
+ - Upload helper: build FormData with `files` parts ({ uri, name, type } objects
+   as React Native requires), optional title/language; onUploadProgress drives a
+   progress bar; AbortController for cancel; DO NOT set Content-Type manually
+   (let the runtime add the multipart boundary; verify behavior with Axios on RN
+   and adjust if needed).
+
+8. AUTH, SESSION, SETTINGS BEHAVIOR
+--------------------------------------------------------------------------------
+ - Boot sequence: load fonts + i18n + stored refresh token -> if token: refresh
+   to get a session and /me; if none: show onboarding. Onboarding flow:
+   welcome -> language (Thai preselected) -> consent -> create guest session ->
+   home. Consent screen explains in plain Thai/English that photos/documents and
+   chats are sent to our servers and AI providers to create study material, can
+   be deleted anytime, and requires a tap on "ยอมรับและเริ่มใช้งาน" which calls
+   PUT /me/consent with meta.consentVersion. Provide a "Privacy details" screen
+   (text from i18n; product owner to supply final legal text; mark placeholder
+   clearly in docs, not in the UI). If any call returns CONSENT_REQUIRED, route
+   to the consent screen and resume the action afterwards.
+ - Guest upgrade: Settings and a gentle banner on Home after the first
+   successful material ("บันทึกความก้าวหน้าไว้ในบัญชี") -> register screen calls
+   POST /auth/register WITH the guest access token (upgrade in place). Sign-in
+   screen for returning users (POST /auth/login) with a warning that signing
+   into another account replaces the guest data on this device.
+ - Settings: UI language, content language, study level, theme, account
+   (display name, email/guest status, sign in / upgrade / log out), privacy
+   (consent status), data controls: delete a single item (via lists), "Delete
+   all my data" (type-to-confirm "DELETE" -> DELETE /me -> wipe local session),
+   app version, API URL (dev builds only). Changes PATCH /me optimistically with
+   rollback on error.
+ - Log out calls POST /auth/logout, clears secure store, clears the query cache.
+
+9. SCREENS AND BEHAVIOR
+--------------------------------------------------------------------------------
+Navigation: bottom tabs (Home, Library, Chat, Settings) + stack screens above
+tabs. A prominent centre/floating "สแกน/Scan" action on Home opens capture.
+Android back button and iOS swipe-back must behave sensibly; confirm before
+leaving an in-progress upload.
+
+9.1 Welcome / Onboarding / Language / Consent  (Section 8). Three-slide intro max
+    (scan -> understand -> practice). Skip allowed. Language screen: two large
+    cards "ไทย" (selected by default) and "English".
+
+9.2 Home (GET /v1/home + GET /v1/meta)
+    Greeting with displayName, big "สแกนโน้ต" and "นำเข้าไฟล์" actions, active
+    jobs strip (progress + tap to open the source), recent sources, recent
+    materials (type icon, title, itemCount, date), quick stats. Empty state for
+    new users with a clear first action. Pull-to-refresh. Fixture banner if
+    meta.ai.* == "fixture"; "AI not configured" info banner if the backend says
+    ai.* == "disabled".
+
+9.3 Capture (expo-camera) and Import
+    - Camera screen: permission flow with rationale (Thai/English), denied state
+      with "open Settings" (Linking.openSettings), torch toggle if supported,
+      shutter with haptic, flip camera, a framing guide overlay, tips ("วางให้
+      ตรง แสงสว่างพอ") . Take multiple photos for one source (up to
+      meta.limits.maxImagesPerSource), show thumbnails strip, delete/reorder.
+    - Gallery: expo-image-picker (allowsMultipleSelection up to the limit; no
+      editing required). Documents: expo-document-picker restricted to
+      meta.supported.documentMimeTypes (copyToCacheDirectory true); pre-validate
+      size against meta.limits and show a helpful message before uploading.
+    - Image prep (src/lib/imageUtils.ts using expo-image-manipulator): convert
+      any picked image (including HEIC) to JPEG, resize so the long edge <= 2048
+      px, quality ~0.85; strip nothing manually (backend strips EXIF). If still >
+      maxImageBytes, recompress at lower quality, else show FILE_TOO_LARGE-style
+      error locally.
+    - Review screen (capture-review): large preview, retake, "add another page",
+      optional title input (leave empty by default; if empty, send no title
+      and let the backend/date-based fallback apply), language hint chips (th/en),
+      primary "เริ่มวิเคราะห์". Upload with progress + cancel.
+
+9.4 Upload and processing progress (source/[id]/index.tsx, status=queued/
+    processing)
+    ProgressSteps driven by job.stage/progress/detail with Thai labels for each
+    stage (ตรวจสอบไฟล์, ปรับภาพ, อ่านข้อความ, กำลังอ่านหน้า X จาก Y, แบ่งเนื้อหา,
+    เสร็จสิ้น). The user can leave; processing continues; show a "we'll keep it
+    in Library" note. On failure: show the localized error for job.error.code,
+    whether it is retryable, and actions: Retry (POST /jobs/:id/retry or
+    /sources/:id/retry), choose another file, delete. IMAGE_UNREADABLE and
+    NO_EXTRACTABLE_CONTENT give concrete tips (lighting, focus, flat page, try a
+    text PDF).
+
+9.5 Source preview (source/[id]/index.tsx, status ready|partial|failed)
+    REQUIRED BEFORE GENERATION. Show: title (editable), kind icon, filename(s),
+    size, pages, detected language, and an extraction status card:
+      ready   -> green "อ่านเนื้อหาสำเร็จ" + quality note
+      partial -> amber "อ่านได้บางส่วน" listing pagesFailed and warnings
+      failed  -> red with error and retry
+    Preview area: for images, a pager of the original photos
+    (expo-image with headers { Authorization } on
+    /sources/{id}/files/{index}); for documents, the first chunks of extracted
+    text via GET /sources/{id}/text with "ดูข้อความทั้งหมด" -> source/[id]/text
+    (infinite list). Explain warnings in plain language (e.g.
+    EMBEDDED_IMAGES_NOT_ANALYZED -> "รูปภาพในเอกสารไม่ได้ถูกวิเคราะห์").
+    Actions: "สรุปเนื้อหา", "สร้างแฟลชการ์ด", "สร้างแบบทดสอบ", "ถามน้องติว"
+    (starts a conversation with sourceId). For partial sources require a one-time
+    acknowledgement ("ฉันเข้าใจว่าบางส่วนอาจไม่ครบ") before enabling actions.
+    Delete source with ConfirmDialog (explain cascade; offer keepMaterials
+    choice).
+
+9.6 Generate options (source/[id]/generate.tsx sheet)
+    Per type: summary length; flashcard count (slider/stepper 5-50); quiz count,
+    difficulty, question types; common: content language (auto/th/en), level,
+    optional page range for long sources (show only when source.pageCount > 1).
+    Submit -> POST /materials (Idempotency-Key) -> navigate to a generation
+    progress view (same ProgressSteps component, stages preparing_context,
+    generating, validating_output, saving) -> on success open material/[id].
+    Handle QUOTA_EXCEEDED, AI_NOT_CONFIGURED, SOURCE_NOT_READY, CONSENT_REQUIRED,
+    VALIDATION_ERROR (suggestPageRange) with specific guidance.
+
+9.7 Material screen (material/[id].tsx)
+    Header with title (editable), star (isSaved), delete, "generated by" footnote
+    (model/promptVersion; fixture banner if mode fixture).
+    Summary: overview card, key points (each with SourceRefChip(s)), sections
+      (collapsible), glossary, limitations callout. Tapping a ref chip opens the
+      source text at that chunk (source/[id]/text?chunk=cN) showing the verbatim
+      quote highlighted when `quote` is non-null; if sourceId is null hide
+      chips. Buttons: "สร้างแฟลชการ์ดจากสรุปนี้" (generates from the same source),
+      "ถามน้องติว".
+    Flashcards: deck overview (count, due count from flashcard-progress),
+      "เริ่มทบทวน". Quiz: overview (count, difficulty mix, last score) and
+      "เริ่มทำแบบทดสอบ".
+
+9.8 Flashcard study (study/flashcards/[materialId])
+    POST /study-sessions (mode flashcards). Show cards ordered with due-first
+    (use flashcard-progress; unseen cards count as due). Flip animation (tap),
+    optional hint, then four rating buttons (again/hard/good/easy) that POST
+    /study-sessions/:id/answers and move on; progress bar; undo not required;
+    swipe gestures optional (buttons are mandatory for accessibility). Show
+    source refs on the back. End -> POST /complete -> result screen with counts
+    per rating and "review the ones you missed". Large Thai text, scrollable
+    card content, never truncated.
+
+9.9 Quiz (study/quiz/[materialId])
+    One question per screen: prompt, options (MC/TF) or text input
+    (short_answer, multiline, Thai keyboard friendly). On submit: lock, POST
+    /answers, show verdict (icon + text + colour), explanation, correct answer,
+    AI feedback for short answers (loading state up to 30 s with cancel-safe UI;
+    on AI_* error offer Retry without losing the typed answer). "Next" ->
+    finally POST /complete -> result screen (study/result/[sessionId]) with
+    score, per-question review, and "retry missed questions" (client-side
+    filter -> new session is NOT required; a simple local review mode is
+    acceptable) and "generate a new quiz".
+
+9.10 Chat (tabs/chat + chat/[conversationId])
+    Chat tab = conversation list (title, preview, source badge), "new chat"
+    (general) and "chat about a source" picker. Conversation screen: inverted
+    list from GET messages (infinite scroll upwards), composer (multiline,
+    max 4000 chars with counter near the limit), send ->
+    POST messages with a generated clientMessageId and Idempotency-Key; show the
+    user's bubble optimistically as "sending", assistant typing indicator
+    (up to 60 s), then replace with server messages. On failure the bubble
+    shows "ส่งไม่สำเร็จ" with Retry (reusing the same keys) and the text is kept.
+    Assistant bubble: text, grounding badge (จากเอกสาร / ความรู้ทั่วไป / ผสม /
+    เอกสารไม่มีคำตอบ), citation chips (tap -> source text at the chunk), suggested
+    follow-up chips (tap to send), copy-text action. Keyboard handling
+    (KeyboardAvoidingView) correct on iOS/Android. Long-press to copy. Delete
+    conversation via swipe/menu with confirm.
+
+9.11 Library and History
+    Library tab: segmented control "แหล่งเนื้อหา" (sources) | "สื่อการเรียน"
+    (materials: filters by type, saved-only star filter) | "บันทึกไว้" (saved).
+    Search box (q). Infinite lists, pull to refresh, swipe/long-press actions
+    (rename, star, delete with confirm), empty/error/loading states.
+    history.tsx: recent study sessions (material title, mode, score, date) from
+    GET /study-sessions, tap -> material or result; plus failed/active jobs
+    with retry/cancel.
+
+9.12 Settings  (Section 8) with sub-screens: Language, Study preferences,
+    Account, Privacy & data, About.
+
+10. NETWORK, STATES, ERRORS (APPLY TO EVERY SCREEN)
+--------------------------------------------------------------------------------
+ Every data screen implements: loading (skeleton), empty (friendly + CTA), error
+ (localized message + retry), success. Offline banner (NetInfo) with disabled
+ submit buttons and clear text; queued actions are NOT retried silently except
+ for explicit user Retry. Distinguish: network error, timeout, auth expired,
+ rate limit (show retryAfterSec countdown), quota exceeded (show reset time),
+ AI unavailable (retry later), consent required. Haptic success/error
+ feedback (expo-haptics) where appropriate. Never display stack traces or raw
+ JSON. Log nothing sensitive (no tokens, no source text) - use a tiny logger
+ that is silent in production.
+
+11. STATE MANAGEMENT SUMMARY
+--------------------------------------------------------------------------------
+ Server data -> TanStack Query only. Session/auth -> AuthProvider (+ secure
+ store). Preferences -> from /me (query) with local mirror for language/theme so
+ the UI is correct before the network responds. In-progress capture pages ->
+ local component/state context (cleared on upload start or discard). Study
+ session UI state -> screen-local reducers. No duplicated server caches.
+
+12. IOS GLASS / BLUR PROGRESSIVE ENHANCEMENT
+--------------------------------------------------------------------------------
+ Build ONE component, GlassSurface (src/components/ui/GlassSurface.tsx), the only
+ place visual effects are chosen, with this order:
+   1. iOS and expo-glass-effect available AND isLiquidGlassAvailable() true
+      -> GlassView (liquid glass).
+   2. else iOS (or Android where it looks acceptable) with expo-blur -> BlurView
+      with tinted overlay (tint follows theme, intensity moderate).
+   3. else a solid/translucent themed Surface (Paper) with border/shadow.
+ Rules: use glass only on chrome (floating tab/action bars, sheet headers,
+ camera overlay controls, hero cards), NEVER behind long reading text or as the
+ only affordance for an action; text must keep AA contrast over any background;
+ honor "reduce transparency" (AccessibilityInfo.isReduceTransparencyEnabled) by
+ falling back to level 3. Import expo-glass-effect defensively (try/catch or
+ platform-gated require) so the app still starts in Expo Go if the module is
+ absent. Do NOT add react-native-liquid-glassmorphism unless you verify it is
+ pure-JS/Expo Go compatible with this SDK and it provides something expo-blur
+ does not; otherwise leave it out and say so in docs/EXPO-GO-NOTES.md. If a
+ candidate library requires a custom dev build, document it as "dev build only"
+ and keep the Expo Go path working.
+
+13. TESTING AND QUALITY GATES
+--------------------------------------------------------------------------------
+ Tooling: jest-expo + @testing-library/react-native; mock HTTP with msw (node) or
+ axios-mock-adapter; mock native modules in jest setup.
+ Required tests:
+  - API client: header attachment, error normalization to ApiError (all contract
+    error shapes + network/timeout), single-flight refresh + one retry,
+    Idempotency-Key reuse on retry, multipart FormData construction.
+  - useJob polling: interval/backoff, stops on terminal states, resumes.
+  - i18n: key parity th/en, no empty strings, every contract error code mapped,
+    every enum value has a label (th+en).
+  - format helpers (dates/numbers in th/en), image prep helper (size/long-edge).
+  - Components: ProgressSteps, ErrorState (retry), Banner fixture, FlashCard
+    flip + ratings, Quiz verdict display, Chat bubble states (sending/failed/
+    retry), GlassSurface fallback selection (mock availability).
+  - Screen-level flows with mocked API: onboarding -> consent -> guest session;
+    upload -> processing -> preview (ready/partial/failed variants); generate ->
+    material render for summary/flashcards/quiz; chat send/failure/retry;
+    CONSENT_REQUIRED redirect; delete-all-data confirmation.
+ Commands that must pass before finishing:
+    bun install --frozen-lockfile
+    bunx biome check .
+    bunx tsc --noEmit
+    bunx jest --ci
+    bunx expo-doctor
+    bunx expo export --platform android --output-dir /tmp/export-check  (smoke
+      bundle check; also try --platform ios if available)
+ Manual verification checklist (document results honestly in docs/QA.md): Expo
+ Go on a real iPhone and Android phone against the real backend: onboarding,
+ camera permission grant/deny, photo -> OCR -> preview -> summary -> flashcards
+ -> quiz -> chat; Thai text not clipped with large font scale; dark mode;
+ airplane-mode behavior; HEIC photo import.
+
+14. IMPLEMENTATION SEQUENCE AND MILESTONES
+--------------------------------------------------------------------------------
+  F0 Inspect + plan; scaffold/adjust Expo + Router + TS strict + Biome + Bun
+     scripts; NativeWind + Paper setup; verify it runs in Expo Go (blank themed
+     screen with Thai text rendering test).
+  F1 Design tokens, theme (light/dark), Thai fonts, i18n (th/en), UI kit
+     primitives, GlassSurface with fallbacks, EXPO-GO-NOTES.
+  F2 API layer: types.ts from Section 3, Axios client, errors, token store,
+     refresh flow, query setup, meta fetch + env validation. Tests.
+  F3 Onboarding, consent, guest session, auth screens (register-upgrade/sign-in),
+     auth gate, tabs shell, Settings with preferences sync and delete-all.
+  F4 Capture/import/image prep/upload with progress; source processing screen
+     (job polling), source preview with extraction status + text viewer + delete.
+  F5 Generation options + progress; Material screens for summary/flashcards/quiz
+     with source ref chips; Library (sources/materials/saved), rename/star/delete.
+  F6 Flashcard study, quiz sessions, result screens, History.
+  F7 Chat (list, conversation, grounding/citations, retry), chat-about-source.
+  F8 Polish: empty/error/loading states everywhere, accessibility pass, Thai
+     typography QA at large font scales, dark mode, offline banner, haptics,
+     fixture banner. Complete tests, docs (README, EXPO-GO-NOTES, QA,
+     LIMITATIONS), final checks.
+
+15. MISSING CREDENTIALS / EXTERNAL DEPENDENCIES
+--------------------------------------------------------------------------------
+ - The app needs no AI credentials. If the backend is unreachable or reports
+   AI disabled/fixture, the UI must degrade gracefully with clear messages, never
+   with fake successes.
+ - If you cannot run Expo Go/simulators in your environment, say so; rely on
+   jest, tsc, biome, expo-doctor, and the export smoke build, and list the manual
+   QA steps the user must perform. Do not claim device testing you did not do.
+ - If a library lacks Expo Go support or you cannot verify it, implement the
+   fallback, and document "requires dev build" in docs/EXPO-GO-NOTES.md.
+ - If the backend contract looks inconsistent with the backend code you can see
+   (you must not edit it), adapt the client to the CONTRACT, note it in
+   docs/CONTRACT-NOTES.md.
+
+16. FINAL DELIVERABLES / ACCEPTANCE CRITERIA
+--------------------------------------------------------------------------------
+  Done only when ALL are true:
+   [ ] All screens in Section 9 exist, are reachable, and work against the real
+       backend per contract 3.5 (field names, enums, nullability, error codes).
+   [ ] Thai is the default UI language; English fully works; no hard-coded
+       user-visible strings; error codes mapped; Thai typography verified at
+       font scale >= 1.3 without clipping.
+   [ ] Guest-first auth with refresh rotation handling, secure token storage,
+       upgrade-in-place registration, logout and delete-all-data.
+   [ ] Capture/import supports camera, gallery (multi-image), TXT/PDF/DOCX; HEIC
+       is converted client-side; size/type pre-validation; upload progress/cancel.
+   [ ] Source preview with extraction status appears BEFORE any generation;
+       partial/failed states handled; warnings explained.
+   [ ] Summary, flashcards, quiz generation + viewing + study sessions + results
+       + library + history + chat with grounding/citation display all work.
+   [ ] Idempotency keys reused on retry; job polling with backoff; offline,
+       rate-limit, quota, AI-unavailable, consent states handled.
+   [ ] Glass effects are optional enhancements with working fallbacks; the app
+       runs in Expo Go; unsupported native modules are documented.
+   [ ] Fixture/mock AI content is always visibly labelled.
+   [ ] biome, tsc, jest, expo-doctor, and export smoke check pass (report actual
+       results). No secrets committed. README documents install, env, run (Expo
+       Go + simulators + physical device LAN-IP note), test, and limitations.
+  Final message to the user: what was built, exact commands, what was verified
+  vs. not (esp. device testing), Expo Go limitations found, and known gaps.
+================================================================================
+END OF opencode-frontend.txt
+================================================================================
