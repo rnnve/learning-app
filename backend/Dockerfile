@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN bun -e "console.log([...new Intl.Segmenter('th', {granularity:'word'}).segment('สวัสดีครับนักเรียน')].length)"
 
 # Create storage directory and assign permissions
-RUN mkdir -p /data/storage && chown -R bun:bun /data/storage
+RUN mkdir -p /data/storage /data/db && chown -R bun:bun /data/storage /data/db
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock tsconfig.json drizzle.config.ts ./
@@ -30,11 +30,12 @@ COPY src ./src
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV STORAGE_DIR=/data/storage
+ENV JSON_DB_PATH=/data/db/db.json
 
 USER bun
 EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
-  CMD bun -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD bun -e "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["bun", "run", "src/index.ts"]
