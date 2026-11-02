@@ -8,7 +8,9 @@ the file to `https://cdn.rynni.cc/upload` under `/apks/`.
 The CDN uses a multipart field named `file`, with `key` and `path` query
 parameters. The upload key is passed to curl over stdin, never included in its
 command arguments. CDN-assigned filenames are random: the workflow preserves the
-returned download URL in its job summary and `latest-apk-details` artifact.
+file path on the public CDN hostname in its job summary and `latest-apk-details`
+artifact. The uploaded file is downloaded again and its SHA-256 checked before
+delivery is marked complete.
 An Actions cache remembers successful deliveries so scheduled runs do not upload
 the same Expo build repeatedly. Failed uploads are not marked as delivered.
 
@@ -23,7 +25,8 @@ needed for CDN delivery. Configure these repository secrets:
 | `CDN_UPLOAD_KEY` | Authentication for the CDN upload endpoint |
 
 Set repository variable `APK_SYNC_ENABLED` to `true` to enable the workflow.
-Optionally set `CDN_UPLOAD_URL` to override the upload endpoint. Uploads always
+Optionally set `CDN_UPLOAD_URL` to override the upload endpoint and
+`CDN_PUBLIC_BASE_URL` to override the public origin (default `https://cdn.rynni.cc`). Uploads always
 use `/apks/`. The uploader rejects APKs larger than 100,000,000 bytes before
 attempting the request, matching the current upload constraint.
 
