@@ -194,6 +194,10 @@
     "typeAnswerPlaceholder": "Type your answer here..."
   },
   "chat": {
+    "deleteTitle": "Delete this conversation?",
+    "deleteConfirm": "All messages in this conversation will be permanently deleted.",
+    "generalDescription": "Ask general questions without choosing a document",
+    "emptyInboxDescription": "Start a general chat or choose a document from your library to ask about",
     "newChat": "New Chat",
     "newChatWithSource": "Chat about Document",
     "selectSourcePrompt": "Select a source document",
