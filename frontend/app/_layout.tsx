@@ -106,10 +106,7 @@ function AppShell() {
   return (
     <PaperProvider theme={theme}>
       <SafeAreaProvider>
-        <StatusBar
-          barStyle={colorScheme === "dark" ? "light-content" : "dark-content"}
-          backgroundColor={theme.colors.background}
-        />
+        <StatusBar barStyle={colorScheme === "dark" ? "light-content" : "dark-content"} />
         <ThemeProvider
           value={{
             ...(theme.dark ? DarkTheme : DefaultTheme),
