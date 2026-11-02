@@ -54,8 +54,9 @@ export async function sendMessage(params: {
   idempotencyKey: string;
   language?: ContentLanguage;
   level?: Level | "auto";
+  signal?: AbortSignal;
 }): Promise<{ userMessage: Message; assistantMessage: Message }> {
-  const { conversationId, idempotencyKey, ...body } = params;
+  const { conversationId, idempotencyKey, signal, ...body } = params;
   const response = await apiClient.post<{ userMessage: Message; assistantMessage: Message }>(
     `/conversations/${conversationId}/messages`,
     body,
@@ -64,6 +65,7 @@ export async function sendMessage(params: {
         "Idempotency-Key": idempotencyKey,
       },
       timeout: 100000,
+      signal,
     },
   );
   return response.data;
