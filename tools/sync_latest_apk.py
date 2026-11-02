@@ -1,4 +1,4 @@
-"""Download a finished EAS APK, verify it, and optionally copy it over SSH."""
+"""Download a finished EAS APK, verify it, and deliver it to the CDN or SSH."""
 import argparse
 import hashlib
 import json
@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
@@ -75,11 +75,60 @@ def deploy(apk, digest, target, directory, identity, known_hosts):
     print(f"Delivered to {target}:{remote_apk}")
 
 
+def upload_cdn(apk, endpoint, directory):
+    key = os.environ.get("CDN_UPLOAD_KEY", "").strip()
+    if not key:
+        raise ValueError("Set CDN_UPLOAD_KEY before uploading")
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("CDN endpoint must use HTTPS without credentials in the URL")
+    query = dict(parse_qsl(parsed.query))
+    query.update(key=key, path=directory)
+    url = urlunparse(parsed._replace(query=urlencode(query), fragment=""))
+    # Pass the authenticated URL on stdin, so process listings and logs never
+    # contain the key. curl streams the multipart body instead of buffering it.
+    command = ["curl.exe" if os.name == "nt" else "curl", "--disable"]
+    if os.name == "nt":
+        command += ["--ssl-revoke-best-effort"]
+    with tempfile.TemporaryDirectory(prefix="cdn-response-") as temporary:
+        response_file = Path(temporary) / "response.json"
+        command += [
+            "--silent", "--show-error", "--fail-with-body", "--connect-timeout", "30",
+            "--max-time", "600", "--config", "-", "--form",
+            f'file=@"{apk.resolve()}";filename="{apk.name}"',
+            "--output", str(response_file), "--write-out", "%{http_code}",
+        ]
+        result = subprocess.run(command, input=f"url = {json.dumps(url)}\n", capture_output=True, text=True)
+        status = result.stdout.strip()
+        if result.returncode or not status.startswith("2"):
+            if status == "413":
+                raise RuntimeError("CDN rejected the APK with HTTP 413: file exceeds the upload limit")
+            raise RuntimeError(f"CDN upload failed (HTTP {status or 'unknown'}, curl exit {result.returncode})")
+        data = json.loads(response_file.read_text(encoding="utf-8"))
+        public_url = data.get("url", "")
+        if urlparse(public_url).scheme != "https":
+            raise ValueError("CDN did not return an HTTPS download URL")
+        if data.get("size") != apk.stat().st_size:
+            raise ValueError("CDN reported a different uploaded file size")
+        request = Request(public_url, headers={"User-Agent": "Mozilla/5.0 StudyApp-APK-Sync/1.0"})
+        digest = hashlib.sha256()
+        with urlopen(request, timeout=120) as downloaded:
+            while chunk := downloaded.read(1024 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() != sha256(apk):
+            raise ValueError("CDN download SHA-256 does not match the uploaded APK")
+        return public_url
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-json", type=Path, required=True, help="JSON from eas build:list or build:view")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--ssh-target", help="Optional SSH destination, e.g. rinne@192.168.1.36")
+    delivery = parser.add_mutually_exclusive_group()
+    delivery.add_argument("--ssh-target", help="Optional SSH destination, e.g. rinne@192.168.1.36")
+    delivery.add_argument("--cdn-url", help="CDN multipart upload endpoint (key comes from CDN_UPLOAD_KEY)")
+    parser.add_argument("--cdn-path", default="/apks/")
+    parser.add_argument("--max-upload-bytes", type=int, default=100_000_000)
     parser.add_argument("--remote-dir", default="/home/rinne")
     parser.add_argument("--identity-file", type=Path)
     parser.add_argument("--known-hosts-file", type=Path)
@@ -89,7 +138,14 @@ def main():
     apk = args.output_dir / filename
     state_path = args.output_dir / "apk-sync-state.json"
     destination = f"{args.ssh_target}:{args.remote_dir}" if args.ssh_target else str(args.output_dir.resolve())
+    if args.cdn_url:
+        destination = f"cdn:{args.cdn_url}:{args.cdn_path}"
+        if not os.environ.get("CDN_UPLOAD_KEY", "").strip():
+            raise ValueError("Set CDN_UPLOAD_KEY before uploading")
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    if args.cdn_url and state.get("buildId") == build["id"] and state.get("destination") == destination and state.get("cdnUrl"):
+        print(f"Already delivered: {state['cdnUrl']}")
+        return
     if state.get("buildId") == build["id"] and state.get("destination") == destination and apk.exists():
         if sha256(apk) == state.get("sha256"):
             print(f"Already delivered build {build['id']}")
@@ -108,6 +164,12 @@ def main():
         ], check=True)
         digest = sha256(download)
         os.replace(download, apk)
+        cdn_url = None
+        if args.cdn_url:
+            if apk.stat().st_size > args.max_upload_bytes:
+                raise ValueError(f"APK is larger than the {args.max_upload_bytes:,}-byte CDN upload limit")
+            cdn_url = upload_cdn(apk, args.cdn_url, args.cdn_path)
+            print(f"CDN download: {cdn_url}")
         if args.ssh_target:
             deploy(apk, digest, args.ssh_target, args.remote_dir, args.identity_file, args.known_hosts_file)
         latest = args.output_dir / "studyapp-latest.apk"
@@ -118,6 +180,7 @@ def main():
         "buildId": build["id"], "version": build["appVersion"],
         "versionCode": build["appBuildVersion"], "sha256": digest,
         "filename": filename, "destination": destination,
+        "cdnUrl": cdn_url,
     })
     print(f"Ready: {apk}")
 
