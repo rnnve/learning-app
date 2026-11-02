@@ -38,7 +38,10 @@ jobs:
         with:
           eas-version: '27.2.0'
           token: ${{ secrets.EXPO_TOKEN }}
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - name: Prepare Android build tools
         run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
       - name: Install dependencies
