@@ -359,10 +359,10 @@ export default function RegisterScreen() {
         </View>
 
         <SecondaryButton
-          label={i18n.t("auth.signIn")}
+          label={i18n.t("auth.signInButton")}
           onPress={() => router.push("/auth/sign-in")}
           style={styles.switchButton}
-          accessibilityLabel={i18n.t("auth.signIn")}
+          accessibilityLabel={i18n.t("auth.signInButton")}
         />
 
         <View style={styles.footer}>
