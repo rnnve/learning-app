@@ -22,6 +22,7 @@ jobs:
       EAS_PROJECT_ROOT: ${{ github.workspace }}/frontend
       CDN_UPLOAD_URL: ${{ vars.CDN_UPLOAD_URL || 'https://cdn.rynni.cc/upload' }}
       CDN_UPLOAD_PATH: /apks/
+      CDN_PUBLIC_BASE_URL: ${{ vars.CDN_PUBLIC_BASE_URL || 'https://cdn.rynni.cc' }}
       CDN_UPLOAD_KEY: ${{ secrets.CDN_UPLOAD_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -67,18 +68,19 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/studyapp-apks/apk-sync-state.json
-          key: cdn-apk-v1-${{ steps.build.outputs.id }}-${{ env.CDN_UPLOAD_URL }}
+          key: cdn-apk-v2-${{ steps.build.outputs.id }}-${{ env.CDN_UPLOAD_URL }}-${{ env.CDN_PUBLIC_BASE_URL }}
       - name: Download, verify, and deliver
         run: |
           python tools/sync_latest_apk.py --build-json "$RUNNER_TEMP/apk-builds.json" \
             --output-dir "$RUNNER_TEMP/studyapp-apks" \
-            --cdn-url "$CDN_UPLOAD_URL" --cdn-path "$CDN_UPLOAD_PATH"
+            --cdn-url "$CDN_UPLOAD_URL" --cdn-path "$CDN_UPLOAD_PATH" \
+            --cdn-public-base-url "$CDN_PUBLIC_BASE_URL"
       - name: Save completed delivery record
         if: steps.delivery-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/studyapp-apks/apk-sync-state.json
-          key: cdn-apk-v1-${{ steps.build.outputs.id }}-${{ env.CDN_UPLOAD_URL }}
+          key: cdn-apk-v2-${{ steps.build.outputs.id }}-${{ env.CDN_UPLOAD_URL }}-${{ env.CDN_PUBLIC_BASE_URL }}
       - name: Show APK download link
         run: |
           python - <<'PY'
