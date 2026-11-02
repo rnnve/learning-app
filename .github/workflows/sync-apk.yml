@@ -1,0 +1,78 @@
+name: Sync latest APK
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17,47 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-latest-apk
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: vars.APK_SYNC_ENABLED == 'true'
+    runs-on: ${{ fromJSON(vars.APK_SYNC_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 20
+    env:
+      EAS_NO_VCS: '1'
+      EAS_PROJECT_ROOT: ${{ github.workspace }}/frontend
+      APK_OUTPUT_DIR: ${{ vars.APK_SYNC_OUTPUT_DIR }}
+      APK_SSH_TARGET: ${{ vars.APK_SSH_TARGET }}
+      APK_REMOTE_DIR: ${{ vars.APK_REMOTE_DIR || '/home/rinne' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check Expo authentication
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          LOCAL_DESTINATION: ${{ vars.APK_SYNC_OUTPUT_DIR }}
+        run: |
+          test -n "$EXPO_TOKEN" || { echo 'Set the EXPO_TOKEN repository secret first.'; exit 1; }
+          test -n "$APK_SSH_TARGET" || test -n "$LOCAL_DESTINATION" || {
+            echo 'Set APK_SSH_TARGET for SSH delivery or APK_SYNC_OUTPUT_DIR on the server runner.'
+            exit 1
+          }
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: '27.2.0'
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Configure SSH delivery
+        if: env.APK_SSH_TARGET != ''
+        env:
+          APK_SSH_KEY: ${{ secrets.APK_SSH_KEY }}
+          APK_SSH_KNOWN_HOSTS: ${{ secrets.APK_SSH_KNOWN_HOSTS }}
+        run: |
+          test -n "$APK_SSH_KEY" && test -n "$APK_SSH_KNOWN_HOSTS"
+          umask 077
+          mkdir -p "$RUNNER_TEMP/apk-ssh"
+          printf '%s\n' "$APK_SSH_KEY" > "$RUNNER_TEMP/apk-ssh/key"
+          printf '%s\n' "$APK_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/apk-ssh/known_hosts"
+      - name: Find latest successful preview APK
+        working-directory: frontend
+        run: |
+          eas build:list --platform android --status finished --build-profile preview \
+            --limit 10 --non-interactive --json > "$RUNNER_TEMP/apk-builds.json"
+      - name: Download, verify, and deliver
+        run: |
+          options=()
+          if [ -n "$APK_SSH_TARGET" ]; then
+            options+=(--ssh-target "$APK_SSH_TARGET" --remote-dir "$APK_REMOTE_DIR" \
+              --identity-file "$RUNNER_TEMP/apk-ssh/key" \
+              --known-hosts-file "$RUNNER_TEMP/apk-ssh/known_hosts")
+          fi
+          output_dir="${APK_OUTPUT_DIR:-$RUNNER_TEMP/studyapp-apks}"
+          python tools/sync_latest_apk.py --build-json "$RUNNER_TEMP/apk-builds.json" \
+            --output-dir "$output_dir" "${options[@]}"
+      - name: Remove temporary SSH credentials
+        if: always() && env.APK_SSH_TARGET != ''
+        run: |
+          rm -f -- "$RUNNER_TEMP/apk-ssh/key" "$RUNNER_TEMP/apk-ssh/known_hosts"
