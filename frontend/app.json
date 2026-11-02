@@ -2,7 +2,7 @@
   "expo": {
     "name": "Thai AI Study",
     "slug": "thai-ai-study",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "thaistudy",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "cc.rynni.studyapp",
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#F8FAFC"
